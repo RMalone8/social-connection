@@ -4,7 +4,9 @@
 	"version": "0.0.0",
 	"type": "module",
 	"scripts": {
-		"dev": "vite",
+		"dev": "pnpm build && wrangler dev",
+		"dev:watch": "vite build --watch & wrangler dev",
+		"dev:vite": "vite",
 		"build": "vite build",
 		"lint": "eslint .",
 		"preview": "pnpm run build && vite preview",

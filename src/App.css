@@ -43,3 +43,74 @@
 .read-the-docs {
 	color: #888;
 }
+
+/* GitHub Login Styles */
+.github-login-btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	background-color: #24292e;
+	color: white;
+	border: none;
+	padding: 12px 24px;
+	border-radius: 6px;
+	cursor: pointer;
+	font-size: 16px;
+	font-weight: 500;
+	transition: background-color 0.2s;
+}
+
+.github-login-btn:hover {
+	background-color: #1c2125;
+}
+
+.login-section {
+	text-align: center;
+}
+
+.user-info {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 12px;
+}
+
+.avatar {
+	border-radius: 50%;
+	border: 2px solid #646cff;
+}
+
+.logout-btn {
+	background-color: #dc3545;
+	color: white;
+	border: none;
+	padding: 8px 16px;
+	border-radius: 4px;
+	cursor: pointer;
+	font-size: 14px;
+	transition: background-color 0.2s;
+}
+
+.logout-btn:hover {
+	background-color: #c82333;
+}
+
+.loading {
+	display: flex;
+	justify-content: center;
+	align-items: center;
+	height: 100vh;
+}
+
+.user-info p {
+	margin: 4px 0;
+}
+
+.user-info a {
+	color: #646cff;
+	text-decoration: none;
+}
+
+.user-info a:hover {
+	text-decoration: underline;
+}

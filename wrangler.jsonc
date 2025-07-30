@@ -8,10 +8,27 @@
 	"main": "worker/index.js",
 	"compatibility_date": "2025-07-26",
 	"assets": {
-		"not_found_handling": "single-page-application"
+		"directory": "./dist",
+		"not_found_handling": "single-page-application",
+		"run_worker_first": [
+			"/api/*"
+		]
+	},
+	"dev": {
+		"port": 8787
 	},
 	"observability": {
 		"enabled": true
+	},
+	/**
+	 * Environment Variables for GitHub OAuth
+	 * Set these values using 'wrangler secret put' command:
+	 * wrangler secret put GITHUB_CLIENT_SECRET
+	 * Or add them to your .dev.vars file for local development
+	 */
+	"vars": {
+		"GITHUB_CLIENT_ID": "Ov23liyFnzqrCBTrkIhX",
+		"GITHUB_REDIRECT_URI": "https://social.moose.boston/api/auth/callback"
 	}
 	/**
 	 * Smart Placement
