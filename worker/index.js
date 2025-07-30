@@ -17,12 +17,7 @@ export default {
 
 async function handleApiRoutes(request, env, url) {
   // Handle GitHub OAuth routes
-  console.log(url.pathname)
   if (url.pathname === "/api/auth/github") {
-    console.log("github login right here!!!!")
-    console.log(env.GITHUB_CLIENT_ID)
-    console.log(env.GITHUB_REDIRECT_URI)
-    console.log(env.GITHUB_CLIENT_SECRET)
     return handleGitHubLogin(env);
   }
 
@@ -57,8 +52,6 @@ function generateState() {
 
 // Handle GitHub login redirect
 function handleGitHubLogin(env) {
-  console.log("handleGitHubLogin")
-  console.log(env.GITHUB_REDIRECT_URI)
   const state = generateState();
   const params = new URLSearchParams({
     client_id: env.GITHUB_CLIENT_ID,
@@ -67,20 +60,17 @@ function handleGitHubLogin(env) {
     state: state,
   });
 
-  console.log(params.toString())
-
   const authUrl = `https://github.com/login/oauth/authorize?${params.toString()}`;
   
   // Create redirect response with headers included from the start
-  let response =  new Response(null, {
+  const headers = new Headers();
+  headers.set('Location', authUrl);
+  headers.append('Set-Cookie', `oauth_state=${state}; Path=/; HttpOnly; SameSite=Lax; Max-Age=600`);
+  
+  return new Response(null, {
     status: 302,
-    headers: {
-      'Location': authUrl,
-      'Set-Cookie': `oauth_state=${state}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=600`
-    }
+    headers: headers
   });
-  console.log(response)
-  return response
 }
 
 // Handle GitHub OAuth callback
@@ -120,6 +110,8 @@ async function handleGitHubCallback(request, env) {
       throw new Error('Failed to get access token');
     }
 
+    console.log(tokenData)
+
     // Get user info from GitHub
     const userResponse = await fetch('https://api.github.com/user', {
       headers: {
@@ -130,6 +122,8 @@ async function handleGitHubCallback(request, env) {
 
     const userData = await userResponse.json();
 
+    console.log(userData)
+
     // Create a simple session token (in production, use proper JWT with signing)
     const sessionData = {
       user: userData,
@@ -139,16 +133,18 @@ async function handleGitHubCallback(request, env) {
 
     const sessionToken = btoa(JSON.stringify(sessionData));
 
+    console.log("sessionData", sessionData)
+    console.log("sessionToken", sessionToken)
+
     // Redirect back to the main page with session cookie
+    const headers = new Headers();
+    headers.set('Location', new URL('/', request.url).toString());
+    headers.append('Set-Cookie', `session=${sessionToken}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${7 * 24 * 60 * 60}`);
+    headers.append('Set-Cookie', `oauth_state=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`); // Clear state cookie
+    
     return new Response(null, {
       status: 302,
-      headers: {
-        'Location': new URL('/', request.url).toString(),
-        'Set-Cookie': [
-          `session=${sessionToken}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${7 * 24 * 60 * 60}`,
-          `oauth_state=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0` // Clear state cookie
-        ].join(', ')
-      }
+      headers: headers
     });
   } catch (error) {
     console.error('OAuth callback error:', error);
@@ -185,7 +181,7 @@ function handleLogout() {
     status: 200,
     headers: {
       'Content-Type': 'application/json',
-      'Set-Cookie': 'session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0'
+      'Set-Cookie': 'session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0'
     }
   });
 }

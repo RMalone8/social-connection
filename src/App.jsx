@@ -29,7 +29,7 @@ function App() {
     }
   }
 
-  const loginWithGitHub = async () => {
+  const loginWithGitHub = () => {
     console.log("loginWithGitHub")
     //window.location.href = '/api/auth/github'
     window.location.assign("/api/auth/github")
