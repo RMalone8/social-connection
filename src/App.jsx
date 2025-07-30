@@ -45,6 +45,23 @@ function App() {
     }
   }
 
+  const testFollowers = async () => {
+    try {
+      const response = await fetch('/api/followers')
+      console.log('Response status:', response.status)
+      console.log('Response headers:', [...response.headers.entries()])
+      
+      if (response.ok) {
+        const data = await response.json()
+        console.log('Followers data:', data)
+      } else {
+        console.log('Error response:', await response.text())
+      }
+    } catch (error) {
+      console.error('Error calling followers:', error)
+    }
+  }
+
   if (loading) {
     return (
       <div className="loading">
@@ -100,10 +117,10 @@ function App() {
 
       <div className='card'>
         <button
-          onClick={() => setCount((count) => count + 1)}
+          onClick={testFollowers}
           aria-label='increment'
         >
-          count is {count}
+          Test Followers Endpoint
         </button>
         <p>
           Edit <code>src/App.tsx</code> and save to test HMR

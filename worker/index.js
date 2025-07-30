@@ -33,6 +33,10 @@ async function handleApiRoutes(request, env, url) {
     return handleLogout();
   }
 
+  if (url.pathname === "/api/followers") {
+    return listFollowers(request);
+  }
+
   // Original API endpoint
   if (url.pathname.startsWith("/api/")) {
     return Response.json({
@@ -122,8 +126,6 @@ async function handleGitHubCallback(request, env) {
 
     const userData = await userResponse.json();
 
-    console.log(userData)
-
     // Create a simple session token (in production, use proper JWT with signing)
     const sessionData = {
       user: userData,
@@ -132,9 +134,6 @@ async function handleGitHubCallback(request, env) {
     };
 
     const sessionToken = btoa(JSON.stringify(sessionData));
-
-    console.log("sessionData", sessionData)
-    console.log("sessionToken", sessionToken)
 
     // Redirect back to the main page with session cookie
     const headers = new Headers();
@@ -198,4 +197,40 @@ function parseCookies(cookieHeader) {
     });
   }
   return cookies;
+}
+
+async function listFollowers(request) {
+  const cookies = parseCookies(request.headers.get('Cookie') || '');
+  const sessionToken = cookies.session;
+
+  console.log("sessionToken", sessionToken) 
+
+  if (!sessionToken) {
+    return new Response('Not authenticated', { status: 401 });
+  }
+
+  try {
+    const sessionData = JSON.parse(atob(sessionToken));
+    console.log("sessionData", sessionData)
+
+    const userData = sessionData.user;
+
+    const following = await fetch(`https://api.github.com/user/following/ericahinkleRH`, {
+      method: 'PUT',
+      headers: {
+        'Authorization': `Bearer ${sessionData.token}`,
+        'User-Agent': 'Social-Connection-App',
+        'Content-Length': '0',
+      },
+    });
+
+    return new Response(JSON.stringify({ following: following }), {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/json',
+      }
+    });
+  } catch (error) {
+    return new Response('Invalid session', { status: 401 });
+  }
 }
