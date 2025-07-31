@@ -21,6 +21,17 @@
 		"enabled": true
 	},
 	/**
+	 * D1 Database Configuration
+	 * Replace database_id with your actual database ID from Step 1
+	 */
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "social_connection_d1",
+			"database_id": "bcfd256e-c01e-4aac-9c14-f742e9655640"
+		}
+	],
+	/**
 	 * Environment Variables for GitHub OAuth
 	 * Set these values using 'wrangler secret put' command:
 	 * wrangler secret put GITHUB_CLIENT_SECRET
