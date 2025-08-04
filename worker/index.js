@@ -14,21 +14,38 @@ export default {
 };
 
 async function handleApiRoutes(request, env, url) {
-  // Handle GitHub OAuth routes
-  if (url.pathname === "/api/auth/github") {
-    return handleGitHubLogin(request, env);
+  // Native account authentication
+  if (url.pathname === "/api/auth/register") {
+    return handleRegister(request, env);
   }
 
-  if (url.pathname === "/api/auth/callback") {
-    return handleGitHubCallback(request, env);
-  }
-
-  if (url.pathname === "/api/user") {
-    return handleUserInfo(request, env);
+  if (url.pathname === "/api/auth/login") {
+    return handleLogin(request, env);
   }
 
   if (url.pathname === "/api/auth/logout") {
     return handleLogout(request, env);
+  }
+
+  // Social media linking (requires native login first)
+  if (url.pathname === "/api/link/github") {
+    return handleGitHubLink(request, env);
+  }
+
+  if (url.pathname === "/api/link/github/callback") {
+    return handleGitHubLinkCallback(request, env);
+  }
+
+  if (url.pathname === "/api/link/instagram") {
+    return handleInstagramLink(request, env);
+  }
+
+  if (url.pathname === "/api/link/instagram/callback") {
+    return handleInstagramLinkCallback(request, env);
+  }
+
+  if (url.pathname === "/api/user") {
+    return handleUserInfo(request, env);
   }
 
   if (url.pathname === "/api/followers") {
@@ -39,12 +56,12 @@ async function handleApiRoutes(request, env, url) {
     return handleSession(request, env);
   }
 
-  if (url.pathname === "/api/follow") {
-    return handleFollow(request, env);
+  if (url.pathname === "/api/github/follow") {
+    return handleGithubFollow(request, env);
   }
 
-  if (url.pathname === "/api/get-followers") {
-    return getFollowers(request, env);
+  if (url.pathname === "/api/github/get-followers") {
+    return getGithubFollowers(request, env);
   }
 
   // Original API endpoint - now with database logging
@@ -55,55 +72,106 @@ async function handleApiRoutes(request, env, url) {
   return new Response(null, { status: 404 });
 }
 
+// Password hashing utilities
+async function hashPassword(password) {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(password);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function verifyPassword(password, hash) {
+  const hashedPassword = await hashPassword(password);
+  return hashedPassword === hash;
+}
+
 // Database helper functions
-async function getOrCreateUser(env, githubUser) {
-  // Check if user exists
+async function createNativeAccount(env, username, email, password, displayName) {
+  const passwordHash = await hashPassword(password);
+  
+  const result = await env.DB.prepare(`
+    INSERT INTO native_accounts (username, email, password_hash, display_name)
+    VALUES (?, ?, ?, ?)
+  `).bind(username, email, passwordHash, displayName).run();
+
+  return await env.DB.prepare(
+    "SELECT id, username, email, display_name, created_at FROM native_accounts WHERE id = ?"
+  ).bind(result.meta.last_row_id).first();
+}
+
+async function getNativeAccountByUsername(env, username) {
+  return await env.DB.prepare(
+    "SELECT * FROM native_accounts WHERE username = ?"
+  ).bind(username).first();
+}
+
+async function linkSocialAccount(env, nativeAccountId, platform, platformData, accessToken) {
+  console.log('Linking social account:', { platform, platformData, nativeAccountId });
+  
+  // Helper function to handle undefined values
+  const safeValue = (value) => value || null;
+  
+  // Check if this social account is already linked
   const existing = await env.DB.prepare(
-    "SELECT * FROM users WHERE github_id = ?"
-  ).bind(githubUser.id).first();
+    "SELECT * FROM social_accounts WHERE platform = ? AND platform_id = ?"
+  ).bind(platform, platformData.id.toString()).first();
 
   if (existing) {
-    // Update user info
+    // Update existing social account
     await env.DB.prepare(`
-      UPDATE users 
-      SET login = ?, name = ?, avatar_url = ?, html_url = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE github_id = ?
+      UPDATE social_accounts 
+      SET native_account_id = ?, platform_username = ?, platform_name = ?, 
+          avatar_url = ?, profile_url = ?, access_token = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
     `).bind(
-      githubUser.login,
-      githubUser.name,
-      githubUser.avatar_url,
-      githubUser.html_url,
-      githubUser.id
+      nativeAccountId,
+      safeValue(platformData.login || platformData.username),
+      safeValue(platformData.name || platformData.full_name),
+      safeValue(platformData.avatar_url),
+      safeValue(platformData.html_url || platformData.profile_url),
+      safeValue(accessToken),
+      existing.id
     ).run();
     
     return existing;
   } else {
-    // Create new user
+    // Create new social account link
     const result = await env.DB.prepare(`
-      INSERT INTO users (github_id, login, name, avatar_url, html_url)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO social_accounts (native_account_id, platform, platform_id, platform_username, 
+                                 platform_name, avatar_url, profile_url, access_token)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `).bind(
-      githubUser.id,
-      githubUser.login,
-      githubUser.name,
-      githubUser.avatar_url,
-      githubUser.html_url
+      nativeAccountId,
+      platform,
+      platformData.id.toString(),
+      safeValue(platformData.login || platformData.username),
+      safeValue(platformData.name || platformData.full_name),
+      safeValue(platformData.avatar_url),
+      safeValue(platformData.html_url || platformData.profile_url),
+      safeValue(accessToken)
     ).run();
 
     return await env.DB.prepare(
-      "SELECT * FROM users WHERE id = ?"
+      "SELECT * FROM social_accounts WHERE id = ?"
     ).bind(result.meta.last_row_id).first();
   }
 }
 
-async function createSession(env, userId, githubToken) {
+async function createSession(env, nativeAccountId) {
   const sessionToken = generateSessionToken();
   const expiresAt = new Date(Date.now() + (7 * 24 * 60 * 60 * 1000)); // 7 days
 
+  // Delete any existing sessions for this user (single session per user)
+  await env.DB.prepare(
+    "DELETE FROM sessions WHERE native_account_id = ?"
+  ).bind(nativeAccountId).run();
+
+  // Create new session
   await env.DB.prepare(`
-    INSERT INTO sessions (session_token, user_id, github_token, expires_at)
-    VALUES (?, ?, ?, ?)
-  `).bind(sessionToken, userId, githubToken, expiresAt.toISOString()).run();
+    INSERT INTO sessions (session_token, native_account_id, expires_at)
+    VALUES (?, ?, ?)
+  `).bind(sessionToken, nativeAccountId, expiresAt.toISOString()).run();
 
   return sessionToken;
 }
@@ -111,13 +179,26 @@ async function createSession(env, userId, githubToken) {
 async function getSessionUser(env, sessionToken) {
   if (!sessionToken) return null;
 
-  const session = await env.DB.prepare(`
-    SELECT s.*, u.* FROM sessions s
-    JOIN users u ON s.user_id = u.id
+  const result = await env.DB.prepare(`
+    SELECT s.*, n.id as account_id, n.username, n.email, n.display_name
+    FROM sessions s
+    JOIN native_accounts n ON s.native_account_id = n.id
     WHERE s.session_token = ? AND s.expires_at > datetime('now')
   `).bind(sessionToken).first();
 
-  return session;
+  if (!result) return null;
+
+  // Get linked social accounts
+  const socialAccounts = await env.DB.prepare(`
+    SELECT platform, platform_username, platform_name, avatar_url, profile_url, access_token
+    FROM social_accounts 
+    WHERE native_account_id = ?
+  `).bind(result.account_id).all();
+
+  return {
+    ...result,
+    social_accounts: socialAccounts.results || []
+  };
 }
 
 async function deleteSession(env, sessionToken) {
@@ -211,11 +292,11 @@ async function logDatabaseContents(env) {
 
   } catch (error) {
     console.error("Error logging database contents:", error);
-    return Response.json({
-      name: "Ryan",
+      return Response.json({
+        name: "Ryan",
       database_error: error.message
-    });
-  }
+      });
+    }
 }
 
 // Generate a random state parameter for OAuth security
@@ -232,8 +313,123 @@ function generateSessionToken() {
     .join('');
 }
 
-// Handle GitHub login redirect
-function handleGitHubLogin(request, env) {
+// Handle native account registration
+async function handleRegister(request, env) {
+  if (request.method !== 'POST') {
+    return new Response('Method not allowed', { status: 405 });
+  }
+
+  try {
+    const { username, email, password, displayName } = await request.json();
+
+    if (!username || !email || !password) {
+      return new Response(JSON.stringify({ error: 'Username, email, and password are required' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    // Check if username or email already exists
+    const existingUser = await env.DB.prepare(
+      "SELECT id FROM native_accounts WHERE username = ? OR email = ?"
+    ).bind(username, email).first();
+
+    if (existingUser) {
+      return new Response(JSON.stringify({ error: 'Username or email already exists' }), {
+        status: 409,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    // Create new account
+    const newAccount = await createNativeAccount(env, username, email, password, displayName);
+    
+    // Create session
+    const sessionToken = await createSession(env, newAccount.id);
+
+    const headers = new Headers();
+    headers.set('Content-Type', 'application/json');
+    headers.append('Set-Cookie', `session=${sessionToken}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${7 * 24 * 60 * 60}`);
+
+    return new Response(JSON.stringify({
+      success: true,
+      user: {
+        username: newAccount.username,
+        email: newAccount.email,
+        displayName: newAccount.display_name
+      }
+    }), { status: 201, headers });
+
+  } catch (error) {
+    console.error('Registration error:', error);
+    return new Response(JSON.stringify({ error: 'Registration failed' }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+}
+
+// Handle native account login
+async function handleLogin(request, env) {
+  if (request.method !== 'POST') {
+    return new Response('Method not allowed', { status: 405 });
+  }
+
+  try {
+    const { username, password } = await request.json();
+
+    if (!username || !password) {
+      return new Response(JSON.stringify({ error: 'Username and password are required' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    // Get user account
+    const account = await getNativeAccountByUsername(env, username);
+    if (!account) {
+      return new Response(JSON.stringify({ error: 'Invalid username or password' }), {
+        status: 401,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    // Verify password
+    const isValidPassword = await verifyPassword(password, account.password_hash);
+    if (!isValidPassword) {
+      return new Response(JSON.stringify({ error: 'Invalid username or password' }), {
+        status: 401,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    // Create session
+    const sessionToken = await createSession(env, account.id);
+
+    const headers = new Headers();
+    headers.set('Content-Type', 'application/json');
+    headers.append('Set-Cookie', `session=${sessionToken}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${7 * 24 * 60 * 60}`);
+
+    return new Response(JSON.stringify({
+      success: true,
+      user: {
+        username: account.username,
+        email: account.email,
+        displayName: account.display_name
+      }
+    }), { status: 200, headers });
+
+  } catch (error) {
+    console.error('Login error:', error);
+    return new Response(JSON.stringify({ error: 'Login failed' }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+}
+
+// Handle GitHub account linking
+function handleGitHubLink(request, env) {
   const state = generateState();
   const params = new URLSearchParams({
     client_id: env.GITHUB_CLIENT_ID,
@@ -255,8 +451,8 @@ function handleGitHubLogin(request, env) {
   });
 }
 
-// Handle GitHub OAuth callback
-async function handleGitHubCallback(request, env) {
+// Handle GitHub account linking callback
+async function handleGitHubLinkCallback(request, env) {
   const url = new URL(request.url);
   const code = url.searchParams.get('code');
   const state = url.searchParams.get('state');
@@ -269,6 +465,12 @@ async function handleGitHubCallback(request, env) {
   const cookies = parseCookies(request.headers.get('Cookie') || '');
   if (cookies.oauth_state !== state) {
     return new Response('Invalid state parameter', { status: 400 });
+  }
+
+  // Check if user is logged in to native account
+  const sessionUser = await getSessionUser(env, cookies.session);
+  if (!sessionUser) {
+    return new Response('Must be logged in to link accounts', { status: 401 });
   }
 
   try {
@@ -292,8 +494,6 @@ async function handleGitHubCallback(request, env) {
       throw new Error('Failed to get access token');
     }
 
-    console.log(tokenData)
-
     // Get user info from GitHub
     const userResponse = await fetch('https://api.github.com/user', {
       headers: {
@@ -304,16 +504,12 @@ async function handleGitHubCallback(request, env) {
 
     const userData = await userResponse.json();
 
-    // Store user in database
-    const user = await getOrCreateUser(env, userData);
-    
-    // Create session in database
-    const sessionToken = await createSession(env, user.id, tokenData.access_token);
+    // Link GitHub account to native account
+    await linkSocialAccount(env, sessionUser.account_id, 'github', userData, tokenData.access_token);
 
-    // Redirect back to the main page with session cookie
+    // Redirect back to the main page
     const headers = new Headers();
     headers.set('Location', new URL('/', request.url).toString());
-    headers.append('Set-Cookie', `session=${sessionToken}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${7 * 24 * 60 * 60}`);
     headers.append('Set-Cookie', `oauth_state=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`); // Clear state cookie
     
     return new Response(null, {
@@ -321,8 +517,95 @@ async function handleGitHubCallback(request, env) {
       headers: headers
     });
   } catch (error) {
-    console.error('OAuth callback error:', error);
-    return new Response('Authentication failed', { status: 500 });
+    console.error('GitHub linking error:', error);
+    return new Response('GitHub linking failed', { status: 500 });
+  }
+}
+
+// Handle Instagram account linking  
+function handleInstagramLink(request, env) {
+  const state = generateState();
+  const params = new URLSearchParams({
+    client_id: env.INSTAGRAM_CLIENT_ID,
+    redirect_uri: env.INSTAGRAM_REDIRECT_URI,
+    scope: 'user_profile,user_media',
+    state: state,
+  });
+
+  const authUrl = `https://api.instagram.com/oauth/authorize?${params.toString()}`;
+
+  const headers = new Headers();
+  headers.set('Location', authUrl);
+  headers.append('Set-Cookie', `oauth_state=${state}; Path=/; HttpOnly; SameSite=Lax; Max-Age=600`);
+
+  return new Response(null, {
+    status: 302,
+    headers: headers
+  });
+}
+
+// Handle Instagram account linking callback
+async function handleInstagramLinkCallback(request, env) {
+  const url = new URL(request.url);
+  const code = url.searchParams.get('code');
+  const state = url.searchParams.get('state');
+
+  if (!code || !state) {
+    return new Response('Missing code or state parameter', { status: 400 });
+  }
+
+  // Verify state parameter
+  const cookies = parseCookies(request.headers.get('Cookie') || '');
+  if (cookies.oauth_state !== state) {
+    return new Response('Invalid state parameter', { status: 400 });
+  }
+
+  // Check if user is logged in to native account
+  const sessionUser = await getSessionUser(env, cookies.session);
+  if (!sessionUser) {
+    return new Response('Must be logged in to link accounts', { status: 401 });
+  }
+
+  try {
+    const tokenResponse = await fetch('https://api.instagram.com/oauth/access_token', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({
+        client_id: env.INSTAGRAM_CLIENT_ID,
+        client_secret: env.INSTAGRAM_CLIENT_SECRET,
+        grant_type: 'authorization_code',
+        redirect_uri: env.INSTAGRAM_REDIRECT_URI,
+        code: code,
+      }),
+    });
+
+    const tokenData = await tokenResponse.json();
+
+    if (!tokenData.access_token) {
+      throw new Error('Failed to get access token');
+    }
+
+    // Get user info from Instagram
+    const userResponse = await fetch(`https://graph.instagram.com/me?fields=id,username&access_token=${tokenData.access_token}`);
+    const userData = await userResponse.json();
+
+    // Link Instagram account to native account
+    await linkSocialAccount(env, sessionUser.account_id, 'instagram', userData, tokenData.access_token);
+
+    // Redirect back to the main page
+    const headers = new Headers();
+    headers.set('Location', new URL('/', request.url).toString());
+    headers.append('Set-Cookie', `oauth_state=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`); // Clear state cookie
+    
+    return new Response(null, {
+      status: 302,
+      headers: headers
+    });
+  } catch (error) {
+    console.error('Instagram linking error:', error);
+    return new Response('Instagram linking failed', { status: 500 });
   }
 }
 
@@ -337,13 +620,18 @@ async function handleUserInfo(request, env) {
     return new Response('Not authenticated', { status: 401 });
   }
 
-  // Return user data
+  // Return user data with linked social accounts
   return Response.json({
-    id: sessionUser.github_id,
-    login: sessionUser.login,
-    name: sessionUser.name,
-    avatar_url: sessionUser.avatar_url,
-    html_url: sessionUser.html_url
+    username: sessionUser.username,
+    email: sessionUser.email,
+    displayName: sessionUser.display_name,
+    socialAccounts: sessionUser.social_accounts.map(account => ({
+      platform: account.platform,
+      username: account.platform_username,
+      name: account.platform_name,
+      avatarUrl: account.avatar_url,
+      profileUrl: account.profile_url
+    }))
   });
 }
 
@@ -424,7 +712,7 @@ async function listFollowers(request, env) {
   }
 }
 
-async function handleFollow(request, env) {
+async function handleGithubFollow(request, env) {
   const cookies = parseCookies(request.headers.get('Cookie') || '');
   const sessionToken = cookies.session;
 
@@ -508,7 +796,7 @@ async function handleFollow(request, env) {
   }
 }
 
-async function getFollowers(request, env) {
+async function getGithubFollowers(request, env) {
   const cookies = parseCookies(request.headers.get('Cookie') || '');
   const sessionToken = cookies.session;
 
@@ -590,6 +878,52 @@ async function getFollowers(request, env) {
 
   } catch (error) {
     console.error('Error in getFollowers:', error);
+    return new Response(JSON.stringify({ error: error.message }), { 
+      status: 500,
+      headers: {
+        'Content-Type': 'application/json',
+      }
+    });
+  }
+}
+
+async function getInstagramFollowers(request, env) {
+  const cookies = parseCookies(request.headers.get('Cookie') || '');
+  const sessionToken = cookies.session;
+
+  if (!sessionToken) {
+    return new Response('Not authenticated', { status: 401 });
+  }
+
+  try {
+    const sessionUser = await getSessionUser(env, sessionToken);
+    
+    if (!sessionUser || !sessionUser.instagram_token) {
+      return new Response('Instagram not connected', { status: 401 });
+    }
+
+    // Note: Instagram Basic Display API has limited follower access
+    // This is a placeholder - actual implementation depends on your Instagram app permissions
+    const followers = await fetch(`https://graph.instagram.com/me`, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${sessionUser.instagram_token}`,
+      },
+    });
+
+    const followersData = await followers.json();
+
+    return new Response(JSON.stringify({ 
+      instagram_user: followersData,
+      message: "Instagram Basic Display API has limited access to follower data" 
+    }), {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/json',
+      }
+    });
+  } catch (error) {
+    console.error('Error in getInstagramFollowers:', error);
     return new Response(JSON.stringify({ error: error.message }), { 
       status: 500,
       headers: {
