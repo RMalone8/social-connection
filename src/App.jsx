@@ -1,19 +1,21 @@
 import { useState, useEffect } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from '/vite.svg'
-import cloudflareLogo from './assets/Cloudflare_Logo.svg'
 import './App.css'
 
 function App() {
-  const [count, setCount] = useState(0)
-  const [name, setName] = useState('unknown')
   const [user, setUser] = useState(null)
   const [loading, setLoading] = useState(true)
-
-  // Check if user is already logged in when component mounts
+  const [loginForm, setLoginForm] = useState(true) // true for login, false for register
+  const [allUsers, setAllUsers] = useState([]) // All users for bubble display
+  
   useEffect(() => {
     checkAuthStatus()
   }, [])
+
+  useEffect(() => {
+    if (user) {
+      fetchAllUsers()
+    }
+  }, [user])
 
   const checkAuthStatus = async () => {
     try {
@@ -29,50 +31,40 @@ function App() {
     }
   }
 
-  // Native authentication
-  const [loginForm, setLoginForm] = useState({ username: '', password: '' })
-  const [registerForm, setRegisterForm] = useState({ username: '', email: '', password: '', displayName: '' })
-  const [showRegister, setShowRegister] = useState(false)
-
-  const handleLogin = async (e) => {
-    e.preventDefault()
+  const fetchAllUsers = async () => {
     try {
-      const response = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(loginForm)
-      })
-      
+      const response = await fetch('/api/users/all')
       if (response.ok) {
-        const data = await response.json()
-        console.log('Login successful:', data)
-        checkAuthStatus() // Refresh user data
-      } else {
-        const error = await response.json()
-        alert(error.error || 'Login failed')
+        const users = await response.json()
+        setAllUsers(users)
       }
     } catch (error) {
-      console.error('Login error:', error)
-      alert('Login failed')
+      console.error('Failed to fetch users:', error)
     }
   }
 
   const handleRegister = async (e) => {
     e.preventDefault()
+    const formData = new FormData(e.target)
+    
     try {
       const response = await fetch('/api/auth/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(registerForm)
+        body: JSON.stringify({
+          username: formData.get('username'),
+          email: formData.get('email'),
+          password: formData.get('password'),
+          display_name: formData.get('display_name')
+        })
       })
       
       if (response.ok) {
-        const data = await response.json()
-        console.log('Registration successful:', data)
-        checkAuthStatus() // Refresh user data
+        const userData = await response.json()
+        setUser(userData)
       } else {
-        const error = await response.json()
-        alert(error.error || 'Registration failed')
+        const error = await response.text()
+        alert('Registration failed: ' + error)
       }
     } catch (error) {
       console.error('Registration error:', error)
@@ -80,263 +72,199 @@ function App() {
     }
   }
 
-  // Social media linking
-  const linkGitHub = () => {
-    window.location.assign("/api/link/github")
+  const handleLogin = async (e) => {
+    e.preventDefault()
+    const formData = new FormData(e.target)
+    
+    try {
+      const response = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: formData.get('username'),
+          password: formData.get('password')
+        })
+      })
+      
+      if (response.ok) {
+        const userData = await response.json()
+        setUser(userData)
+      } else {
+        const error = await response.text()
+        alert('Login failed: ' + error)
+      }
+    } catch (error) {
+      console.error('Login error:', error)
+      alert('Login failed')
+    }
   }
 
-  const linkInstagram = () => {
-    window.location.assign("/api/link/instagram")
+  const linkGitHub = () => {
+    window.location.assign("/api/link/github")
   }
 
   const logout = async () => {
     try {
       await fetch('/api/auth/logout', { method: 'POST' })
       setUser(null)
+      setAllUsers([])
     } catch (error) {
-      console.error('Error logging out:', error)
-    }
-  }
-
-  const testFollowers = async () => {
-    try {
-      const response = await fetch('/api/followers')
-      console.log('Response status:', response.status)
-      console.log('Response headers:', [...response.headers.entries()])
-      
-      if (response.ok) {
-        const data = await response.json()
-        console.log('Followers data:', data)
-      } else {
-        console.log('Error response:', await response.text())
-      }
-    } catch (error) {
-      console.error('Error calling followers:', error)
+      console.error('Logout error:', error)
     }
   }
 
   const makeEveryoneFollowMe = async () => {
     try {
-      const response = await fetch('/api/get-followers')
-      console.log('Get Followers Response status:', response.status)
-      
+      const response = await fetch('/api/github/get-followers', { method: 'POST' })
       if (response.ok) {
-        const data = await response.json()
-        console.log('Get Followers Result:', data)
-        alert(`Success! Made ${data.successful}/${data.total_attempts} users follow you.`)
+        alert('🎉 Everyone is now following you on GitHub!')
       } else {
-        const errorText = await response.text()
-        console.log('Get Followers Error:', errorText)
-        alert('Error: ' + errorText)
+        alert('Failed to make everyone follow you')
       }
     } catch (error) {
-      console.error('Error in makeEveryoneFollowMe:', error)
-      alert('Error: ' + error.message)
+      console.error('Follow action failed:', error)
+      alert('Follow action failed')
     }
   }
 
-  const followOtherPeople = async () => {
+  const followEveryone = async () => {
     try {
-      const response = await fetch('/api/follow')
-      console.log('Response status:', response.status)
-      console.log('Response headers:', [...response.headers.entries()])
+      const response = await fetch('/api/github/follow-everyone', { method: 'POST' })
+      if (response.ok) {
+        alert('🎉 You are now following everyone on GitHub!')
+      } else {
+        alert('Failed to follow everyone')
+      }
     } catch (error) {
-      console.error('Error calling follow:', error)
+      console.error('Follow action failed:', error)
+      alert('Follow action failed')
     }
   }
 
   if (loading) {
     return (
-      <div className="loading">
-        <p>Loading...</p>
+      <div className="bubbly-container">
+        <div className="tropical-loading">
+          <div className="bubble-loader"></div>
+          <p>🏝️ Loading Bubbly...</p>
+        </div>
+      </div>
+    )
+  }
+
+  if (!user) {
+    return (
+      <div className="bubbly-container">
+        <div className="tropical-header">
+          <h1>🫧 Welcome to Bubbly</h1>
+          <p>🏝️ Your tropical social connection paradise</p>
+        </div>
+        
+        <div className="auth-container">
+          <div className="auth-toggle">
+            <button 
+              className={loginForm ? 'active' : ''} 
+              onClick={() => setLoginForm(true)}
+            >
+              Login
+            </button>
+            <button 
+              className={!loginForm ? 'active' : ''} 
+              onClick={() => setLoginForm(false)}
+            >
+              Register
+            </button>
+          </div>
+
+          {loginForm ? (
+            <form onSubmit={handleLogin} className="auth-form">
+              <h2>🌺 Login to Bubbly</h2>
+              <input type="text" name="username" placeholder="Username" required />
+              <input type="password" name="password" placeholder="Password" required />
+              <button type="submit" className="tropical-btn">🏄‍♂️ Dive In</button>
+            </form>
+          ) : (
+            <form onSubmit={handleRegister} className="auth-form">
+              <h2>🌴 Join Bubbly</h2>
+              <input type="text" name="username" placeholder="Username" required />
+              <input type="email" name="email" placeholder="Email" required />
+              <input type="text" name="display_name" placeholder="Display Name" required />
+              <input type="password" name="password" placeholder="Password" required />
+              <button type="submit" className="tropical-btn">🌊 Create Account</button>
+            </form>
+          )}
+        </div>
       </div>
     )
   }
 
   return (
-    <>
-      <div>
-        <a href='https://vite.dev' target='_blank'>
-          <img src={viteLogo} className='logo' alt='Vite logo' />
-        </a>
-        <a href='https://react.dev' target='_blank'>
-          <img src={reactLogo} className='logo react' alt='React logo' />
-        </a>
-        <a href='https://workers.cloudflare.com/' target='_blank'>
-          <img src={cloudflareLogo} className='logo cloudflare' alt='Cloudflare logo' />
-        </a>
+    <div className="bubbly-container">
+      <div className="tropical-header">
+        <h1>🫧 Bubbly</h1>
+        <div className="user-info">
+          <span>🌺 Welcome, {user.display_name || user.username}!</span>
+          <button onClick={logout} className="logout-btn">🏖️ Logout</button>
+        </div>
       </div>
-      <h1>Vite + React + Cloudflare</h1>
-      
-      {/* Authentication Section */}
-      <div className='card'>
-        {user ? (
-          <div className="user-info">
-            <p>Welcome, <strong>{user.displayName || user.username}</strong>!</p>
-            <p>Username: @{user.username}</p>
-            <p>Email: {user.email}</p>
-            
-            <div className="social-accounts">
-              <h4>Linked Accounts:</h4>
-              {user.socialAccounts && user.socialAccounts.length > 0 ? (
-                user.socialAccounts.map((account, index) => (
-                  <div key={index} className="social-account">
-                    <img 
-                      src={account.avatarUrl} 
-                      alt={`${account.username} avatar`}
-                      className="social-avatar"
-                      width="30"
-                      height="30"
-                    />
-                    <span>{account.platform}: @{account.username}</span>
-                  </div>
-                ))
+
+      {/* Social Account Linking */}
+      {(!user.social_accounts || user.social_accounts.length === 0) && (
+        <div className="link-social-container">
+          <p>🔗 Link your social accounts to join the bubble party!</p>
+          <button onClick={linkGitHub} className="github-link-btn">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.30.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
+            </svg>
+            🐙 Link GitHub
+          </button>
+        </div>
+      )}
+
+      {/* User Bubbles */}
+      <div className="bubble-ocean">
+        <h2>🌊 Bubble Ocean - All Bubbly Users</h2>
+        <div className="bubbles-container">
+          {allUsers.map((bubbleUser, index) => (
+            <div 
+              key={bubbleUser.id || index} 
+              className={`user-bubble ${bubbleUser.id === user.id ? 'current-user' : ''}`}
+              style={{
+                animationDelay: `${index * 0.2}s`
+              }}
+            >
+              {bubbleUser.social_accounts && bubbleUser.social_accounts.length > 0 ? (
+                <img 
+                  src={bubbleUser.social_accounts[0].avatar_url} 
+                  alt={bubbleUser.display_name}
+                  className="bubble-avatar"
+                />
               ) : (
-                <p>No social accounts linked yet</p>
+                <div className="bubble-avatar-placeholder">
+                  🏝️
+                </div>
               )}
-              
-              <div className="link-buttons">
-                <button onClick={linkGitHub} className="github-login-btn">
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                    <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.30.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
-                  </svg>
-                  Link GitHub
-                </button>
-                <button onClick={linkInstagram} className="instagram-login-btn">
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                    <path d="M12 2.163c3.204 0 3.584.012 4.85.07 3.252.148 4.771 1.691 4.919 4.919.058 1.265.069 1.645.069 4.849 0 3.205-.012 3.584-.069 4.849-.149 3.225-1.664 4.771-4.919 4.919-1.266.058-1.644.07-4.85.07-3.204 0-3.584-.012-4.849-.07-3.26-.149-4.771-1.699-4.919-4.92-.058-1.265-.07-1.644-.07-4.849 0-3.204.013-3.583.07-4.849.149-3.227 1.664-4.771 4.919-4.919 1.266-.057 1.645-.069 4.849-.069zm0-2.163c-3.259 0-3.667.014-4.947.072-4.358.2-6.78 2.618-6.98 6.98-.059 1.281-.073 1.689-.073 4.948 0 3.259.014 3.668.072 4.948.2 4.358 2.618 6.78 6.98 6.98 1.281.058 1.689.072 4.948.072 3.259 0 3.668-.014 4.948-.072 4.354-.2 6.782-2.618 6.979-6.98.059-1.28.073-1.689.073-4.948 0-3.259-.014-3.667-.072-4.947-.196-4.354-2.617-6.78-6.979-6.98-1.281-.059-1.69-.073-4.949-.073zm0 5.838c-3.403 0-6.162 2.759-6.162 6.162s2.759 6.163 6.162 6.163 6.162-2.759 6.162-6.163c0-3.403-2.759-6.162-6.162-6.162zm0 10.162c-2.209 0-4-1.79-4-4 0-2.209 1.791-4 4-4s4 1.791 4 4c0 2.21-1.791 4-4 4zm6.406-11.845c-.796 0-1.441.645-1.441 1.44s.645 1.44 1.441 1.44c.795 0 1.439-.645 1.439-1.44s-.644-1.44-1.439-1.44z"/>
-                  </svg>
-                  Link Instagram
-                </button>
+              <div className="bubble-name">
+                {bubbleUser.display_name || bubbleUser.username}
               </div>
+              {bubbleUser.id === user.id && (
+                <div className="current-user-indicator">👑</div>
+              )}
             </div>
-            
-            <button onClick={logout} className="logout-btn">
-              Logout
-            </button>
-          </div>
-        ) : (
-          <div className="login-section">
-            <h2>Social Connection</h2>
-            
-            {!showRegister ? (
-              // Login Form
-              <form onSubmit={handleLogin} className="auth-form">
-                <h3>Login</h3>
-                <input
-                  type="text"
-                  placeholder="Username"
-                  value={loginForm.username}
-                  onChange={(e) => setLoginForm({...loginForm, username: e.target.value})}
-                  required
-                />
-                <input
-                  type="password"
-                  placeholder="Password"
-                  value={loginForm.password}
-                  onChange={(e) => setLoginForm({...loginForm, password: e.target.value})}
-                  required
-                />
-                <button type="submit" className="auth-btn">Login</button>
-                <p>
-                  Don't have an account? 
-                  <button type="button" onClick={() => setShowRegister(true)} className="link-btn">
-                    Register here
-                  </button>
-                </p>
-              </form>
-            ) : (
-              // Register Form
-              <form onSubmit={handleRegister} className="auth-form">
-                <h3>Register</h3>
-                <input
-                  type="text"
-                  placeholder="Username"
-                  value={registerForm.username}
-                  onChange={(e) => setRegisterForm({...registerForm, username: e.target.value})}
-                  required
-                />
-                <input
-                  type="email"
-                  placeholder="Email"
-                  value={registerForm.email}
-                  onChange={(e) => setRegisterForm({...registerForm, email: e.target.value})}
-                  required
-                />
-                <input
-                  type="password"
-                  placeholder="Password"
-                  value={registerForm.password}
-                  onChange={(e) => setRegisterForm({...registerForm, password: e.target.value})}
-                  required
-                />
-                <input
-                  type="text"
-                  placeholder="Display Name (optional)"
-                  value={registerForm.displayName}
-                  onChange={(e) => setRegisterForm({...registerForm, displayName: e.target.value})}
-                />
-                <button type="submit" className="auth-btn">Register</button>
-                <p>
-                  Already have an account? 
-                  <button type="button" onClick={() => setShowRegister(false)} className="link-btn">
-                    Login here
-                  </button>
-                </p>
-              </form>
-            )}
-          </div>
-        )}
+          ))}
+        </div>
       </div>
 
-      <div className='card'>
-        <button
-          onClick={testFollowers}
-          aria-label='increment'
-        >
-          Test Database Endpoint
+      {/* Action Buttons */}
+      <div className="action-buttons">
+        <button onClick={makeEveryoneFollowMe} className="action-btn follow-me-btn">
+          🌟 Everyone Follow Me
         </button>
-        <p>
-          Edit <code>src/App.tsx</code> and save to test HMR
-        </p>
-      </div>
-      <div className='card'>
-        <button
-          onClick={() => {
-            fetch('/api/')
-              .then((res) => res.json())
-              .then((data) => setName(data.name))
-          }}
-          aria-label='get name'
-        >
-          Name from API is: {name}
-        </button>
-        <p>
-          Edit <code>worker/index.js</code> to change the name
-        </p>
-      </div>
-      <div className='card'>
-        <button
-          onClick={followOtherPeople}
-          aria-label='increment'
-        >
-          Follow Other People
+        <button onClick={followEveryone} className="action-btn follow-all-btn">
+          🤝 I'll Follow Everyone
         </button>
       </div>
-      <div className='card'>
-        <button
-          onClick={makeEveryoneFollowMe}
-          aria-label='increment'
-          className="github-login-btn"
-        >
-          🎯 Make Everyone Follow Me
-        </button>
-        <p>
-          Makes ALL users (online & offline) follow you using their stored tokens
-        </p>
-      </div>
-
-    </>
+    </div>
   )
 }
 

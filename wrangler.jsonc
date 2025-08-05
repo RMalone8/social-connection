@@ -27,8 +27,8 @@
 	"d1_databases": [
 		{
 			"binding": "DB",
-			"database_name": "social_connection_d1",
-			"database_id": "bcfd256e-c01e-4aac-9c14-f742e9655640"
+			"database_name": "social_connection_prod",
+			"database_id": "a8a8b957-b1b5-4ab4-956a-bc7d73cebf22"
 		}
 	],
 	/**
@@ -41,8 +41,8 @@
 	"vars": {
 		"GITHUB_CLIENT_ID": "Ov23liyFnzqrCBTrkIhX",
 		"GITHUB_REDIRECT_URI": "https://social.moose.boston/api/link/github/callback",
-		"INSTAGRAM_CLIENT_ID": "your-instagram-client-id",
-		"INSTAGRAM_REDIRECT_URI": "https://social.moose.boston/api/link/instagram/callback"
+		"LINKEDIN_CLIENT_ID": "7850g7in6mds1q",
+		"LINKEDIN_REDIRECT_URI": "https://social.moose.boston/api/link/linkedin/callback"
 	}
 	/**
 	 * Smart Placement
