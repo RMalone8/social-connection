@@ -41,8 +41,8 @@
 	"vars": {
 		"GITHUB_CLIENT_ID": "Ov23liyFnzqrCBTrkIhX",
 		"GITHUB_REDIRECT_URI": "https://social.moose.boston/api/link/github/callback",
-		"LINKEDIN_CLIENT_ID": "7850g7in6mds1q",
-		"LINKEDIN_REDIRECT_URI": "https://social.moose.boston/api/link/linkedin/callback"
+		"SPOTIFY_CLIENT_ID": "fb93e89c3374464992c103ffa45b1a65",
+		"SPOTIFY_REDIRECT_URI": "https://social.moose.boston/api/link/spotify/callback"
 	}
 	/**
 	 * Smart Placement

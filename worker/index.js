@@ -41,12 +41,20 @@ async function handleApiRoutes(request, env, url) {
     return handleGitHubLinkCallback(request, env);
   }
 
-  if (url.pathname === "/api/link/linkedin") {
-    return handleLinkedInLink(request, env);
+  if (url.pathname === "/api/link/spotify") {
+    return handleSpotifyLink(request, env);
   }
 
-  if (url.pathname === "/api/link/linkedin/callback") {
-    return handleLinkedInLinkCallback(request, env);
+  if (url.pathname === "/api/link/spotify/logout") {
+    return handleSpotifyLogout(request, env);
+  }
+
+  if (url.pathname === "/api/link/spotify/callback") {
+    return handleSpotifyLinkCallback(request, env);
+  }
+
+  if (url.pathname === "/api/link/spotify/success") {
+    return handleSpotifySuccess(request, env);
   }
 
   if (url.pathname === "/api/user") {
@@ -77,6 +85,14 @@ async function handleApiRoutes(request, env, url) {
     return followEveryoneOnGithub(request, env);
   }
 
+  if (url.pathname === "/api/spotify/follow-everyone") {
+    return followEveryoneOnSpotify(request, env);
+  }
+
+  if (url.pathname === "/api/spotify/get-followers") {
+    return getSpotifyFollowers(request, env);
+  }
+
   // Original API endpoint - now with database logging
   if (url.pathname.startsWith("/api/")) {
     return logDatabaseContents(env);
@@ -100,13 +116,13 @@ async function verifyPassword(password, hash) {
 }
 
 // Database helper functions
-async function createNativeAccount(env, username, email, password, displayName) {
+async function createNativeAccount(env, username, email, password, display_name) {
   const passwordHash = await hashPassword(password);
   
   const result = await env.DB.prepare(`
     INSERT INTO native_accounts (username, email, password_hash, display_name)
     VALUES (?, ?, ?, ?)
-  `).bind(username, email, passwordHash, displayName).run();
+  `).bind(username, email, passwordHash, display_name).run();
 
   return await env.DB.prepare(
     "SELECT id, username, email, display_name, created_at FROM native_accounts WHERE id = ?"
@@ -131,14 +147,19 @@ async function linkSocialAccount(env, nativeAccountId, platform, platformData, a
   ).bind(platform, platformData.id.toString()).first();
 
   if (existing) {
-    // Update existing social account
+    // Check if this social account is already linked to a different native account
+    if (existing.native_account_id !== nativeAccountId) {
+      console.log(`Social account ${platform}:${platformData.id} already linked to different native account ${existing.native_account_id}, current user is ${nativeAccountId}`);
+      throw new Error(`This ${platform} account is already linked to a different Bubbly account. Please use a different ${platform} account or contact support.`);
+    }
+    
+    // Update existing social account (same user, just refreshing tokens/info)
     await env.DB.prepare(`
       UPDATE social_accounts 
-      SET native_account_id = ?, platform_username = ?, platform_name = ?, 
+      SET platform_username = ?, platform_name = ?, 
           avatar_url = ?, profile_url = ?, access_token = ?, updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `).bind(
-      nativeAccountId,
       safeValue(platformData.login || platformData.username),
       safeValue(platformData.name || platformData.full_name),
       safeValue(platformData.avatar_url),
@@ -333,9 +354,13 @@ async function handleRegister(request, env) {
   }
 
   try {
-    const { username, email, password, displayName } = await request.json();
+    const requestData = await request.json();
+    console.log('Registration attempt with data:', requestData);
+    
+    const { username, email, password, display_name } = requestData;
 
     if (!username || !email || !password) {
+      console.log('Registration failed: Missing required fields', { username, email, password: !!password, display_name });
       return new Response(JSON.stringify({ error: 'Username, email, and password are required' }), {
         status: 400,
         headers: { 'Content-Type': 'application/json' }
@@ -348,6 +373,7 @@ async function handleRegister(request, env) {
     ).bind(username, email).first();
 
     if (existingUser) {
+      console.log('Registration failed: Username or email already exists', { username, email });
       return new Response(JSON.stringify({ error: 'Username or email already exists' }), {
         status: 409,
         headers: { 'Content-Type': 'application/json' }
@@ -355,10 +381,13 @@ async function handleRegister(request, env) {
     }
 
     // Create new account
-    const newAccount = await createNativeAccount(env, username, email, password, displayName);
+    console.log('Creating new account for:', { username, email, display_name });
+    const newAccount = await createNativeAccount(env, username, email, password, display_name);
+    console.log('Account created successfully:', newAccount);
     
     // Create session
     const sessionToken = await createSession(env, newAccount.id);
+    console.log('Session created for new account');
 
     const headers = new Headers();
     headers.set('Content-Type', 'application/json');
@@ -367,9 +396,10 @@ async function handleRegister(request, env) {
     return new Response(JSON.stringify({
       success: true,
       user: {
+        id: newAccount.id,
         username: newAccount.username,
         email: newAccount.email,
-        displayName: newAccount.display_name
+        display_name: newAccount.display_name
       }
     }), { status: 201, headers });
 
@@ -449,6 +479,9 @@ function handleGitHubLink(request, env) {
     redirect_uri: env.GITHUB_REDIRECT_URI,
     scope: 'user:email, user:follow',
     state: state,
+    allow_signup: 'true',
+    // Add timestamp to bust GitHub's OAuth cache and force fresh auth
+    t: Date.now().toString()
   });
 
   const authUrl = `https://github.com/login/oauth/authorize?${params.toString()}`;
@@ -520,9 +553,12 @@ async function handleGitHubLinkCallback(request, env) {
     // Link GitHub account to native account
     await linkSocialAccount(env, sessionUser.account_id, 'github', userData, tokenData.access_token);
 
-    // Redirect back to the main page
+    // Redirect back to the main page with success indicator
+    const redirectUrl = new URL('/', request.url);
+    redirectUrl.searchParams.set('linked', 'github');
+    
     const headers = new Headers();
-    headers.set('Location', new URL('/', request.url).toString());
+    headers.set('Location', redirectUrl.toString());
     headers.append('Set-Cookie', `oauth_state=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`); // Clear state cookie
     
     return new Response(null, {
@@ -535,24 +571,26 @@ async function handleGitHubLinkCallback(request, env) {
   }
 }
 
-// Handle LinkedIn account linking  
-function handleLinkedInLink(request, env) {
+// Handle Spotify account linking  
+function handleSpotifyLink(request, env) {
   const state = generateState();
   const params = new URLSearchParams({
     response_type: 'code',
-    client_id: env.LINKEDIN_CLIENT_ID,
-    redirect_uri: env.LINKEDIN_REDIRECT_URI,
-    scope: 'openid profile',
+    client_id: env.SPOTIFY_CLIENT_ID,
+    redirect_uri: env.SPOTIFY_REDIRECT_URI,
+    scope: 'user-read-private user-read-email user-follow-modify user-follow-read',
     state: state,
+    show_dialog: 'true', // Force Spotify to show login dialog even if user is logged in
   });
 
-  console.log('LinkedIn OAuth params:', params.toString())
-  console.log('LinkedIn Client ID:', env.LINKEDIN_CLIENT_ID)
-  console.log('LinkedIn Redirect URI:', env.LINKEDIN_REDIRECT_URI)
+  console.log('Spotify OAuth params:', params.toString())
+  console.log('Spotify Client ID:', env.SPOTIFY_CLIENT_ID)
+  console.log('Spotify Redirect URI:', env.SPOTIFY_REDIRECT_URI)
 
-  const authUrl = `https://www.linkedin.com/oauth/v2/authorization?${params.toString()}`;
-  console.log('Full LinkedIn auth URL:', authUrl)
+  const authUrl = `https://accounts.spotify.com/authorize?${params.toString()}`;
+  console.log('Full Spotify auth URL:', authUrl)
 
+  // Redirect directly to Spotify auth (logout happens after successful linking)
   const headers = new Headers();
   headers.set('Location', authUrl);
   headers.append('Set-Cookie', `oauth_state=${state}; Path=/; HttpOnly; SameSite=Lax; Max-Age=600`);
@@ -563,78 +601,177 @@ function handleLinkedInLink(request, env) {
   });
 }
 
-// Handle LinkedIn account linking callback
-async function handleLinkedInLinkCallback(request, env) {
-  console.log('=== LinkedIn Callback Hit ===')
+// Handle Spotify logout intermediate page
+function handleSpotifyLogout(request, env) {
+  const url = new URL(request.url);
+  const authUrl = url.searchParams.get('auth_url');
+  const state = url.searchParams.get('state');
+  
+  if (!authUrl || !state) {
+    return new Response('Missing parameters', { status: 400 });
+  }
+
+  // Create an HTML page that logs out of Spotify then redirects
+  const html = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Linking Spotify Account...</title>
+      <style>
+        body { 
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+          display: flex;
+          justify-content: center;
+          align-items: center;
+          min-height: 100vh;
+          margin: 0;
+          background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+          color: white;
+        }
+        .container {
+          text-align: center;
+          padding: 2rem;
+          background: rgba(255, 255, 255, 0.1);
+          border-radius: 20px;
+          backdrop-filter: blur(10px);
+        }
+        .spinner {
+          width: 40px;
+          height: 40px;
+          border: 4px solid rgba(255, 255, 255, 0.3);
+          border-top: 4px solid white;
+          border-radius: 50%;
+          animation: spin 1s linear infinite;
+          margin: 0 auto 1rem;
+        }
+        @keyframes spin {
+          0% { transform: rotate(0deg); }
+          100% { transform: rotate(360deg); }
+        }
+      </style>
+    </head>
+    <body>
+      <div class="container">
+        <div class="spinner"></div>
+        <h2>🎵 Preparing Spotify Connection</h2>
+        <p>Please wait while we prepare a fresh login...</p>
+      </div>
+      
+      <script>
+        // First, try to logout from Spotify by loading logout URL in hidden iframe
+        const iframe = document.createElement('iframe');
+        iframe.style.display = 'none';
+        iframe.src = 'https://accounts.spotify.com/logout';
+        document.body.appendChild(iframe);
+        
+        // Wait a moment for logout, then redirect to auth
+        setTimeout(() => {
+          window.location.href = '${authUrl}';
+        }, 2000);
+      </script>
+    </body>
+    </html>
+  `;
+
+  return new Response(html, {
+    headers: { 'Content-Type': 'text/html' }
+  });
+}
+
+// Handle Spotify account linking callback
+async function handleSpotifyLinkCallback(request, env) {
+  console.log('=== Spotify Callback Hit ===')
   console.log('Full callback URL:', request.url)
   
   const url = new URL(request.url);
-  const code = url.searchParams.get('code');
-  const state = url.searchParams.get('state');
-  const error = url.searchParams.get('error');
-  const errorDescription = url.searchParams.get('error_description');
+    const code = url.searchParams.get('code');
+    const state = url.searchParams.get('state');
+    const error = url.searchParams.get('error');
+    const errorDescription = url.searchParams.get('error_description');
 
-  console.log('Callback params:', { code, state, error, errorDescription })
+    console.log('Callback params:', { code, state, error, errorDescription })
+    
+    if (!code || !state) {
+      console.log('Missing code or state parameter');
+      return new Response('Missing code or state parameter', { status: 400 });
+    }
 
-  if (!code || !state) {
-    return new Response('Missing code or state parameter', { status: 400 });
-  }
+    // Verify state parameter
+    const cookies = parseCookies(request.headers.get('Cookie') || '');
+    console.log('Cookies received:', cookies);
+    
+    if (cookies.oauth_state !== state) {
+      console.log('State parameter mismatch:', { received: state, expected: cookies.oauth_state });
+      return new Response('Invalid state parameter', { status: 400 });
+    }
 
-  // Verify state parameter
-  const cookies = parseCookies(request.headers.get('Cookie') || '');
-  if (cookies.oauth_state !== state) {
-    return new Response('Invalid state parameter', { status: 400 });
-  }
-
-  // Check if user is logged in to native account
-  const sessionUser = await getSessionUser(env, cookies.session);
-  if (!sessionUser) {
-    return new Response('Must be logged in to link accounts', { status: 401 });
-  }
+    // Check if user is logged in to native account
+    console.log('Checking session user...');
+    const sessionUser = await getSessionUser(env, cookies.session);
+    console.log('Session user result:', sessionUser);
+    
+    if (!sessionUser) {
+      console.log('No session user found, returning 401');
+      return new Response('Must be logged in to link accounts', { status: 401 });
+    }
 
   try {
-    const tokenResponse = await fetch('https://www.linkedin.com/oauth/v2/accessToken', {
+    console.log('Exchanging code for Spotify token...')
+    
+    // Create base64 encoded credentials for Spotify
+    const credentials = btoa(`${env.SPOTIFY_CLIENT_ID}:${env.SPOTIFY_CLIENT_SECRET}`);
+    console.log('Spotify credentials created for client ID:', env.SPOTIFY_CLIENT_ID);
+    
+    const tokenResponse = await fetch('https://accounts.spotify.com/api/token', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
+        'Authorization': `Basic ${credentials}`,
       },
       body: new URLSearchParams({
         grant_type: 'authorization_code',
         code: code,
-        client_id: env.LINKEDIN_CLIENT_ID,
-        client_secret: env.LINKEDIN_CLIENT_SECRET,
-        redirect_uri: env.LINKEDIN_REDIRECT_URI,
+        redirect_uri: env.SPOTIFY_REDIRECT_URI,
       }),
     });
 
     const tokenData = await tokenResponse.json();
+    console.log('Spotify token response:', tokenData);
 
     if (!tokenData.access_token) {
-      throw new Error('Failed to get access token');
+      console.error('No access token in Spotify response:', tokenData);
+      throw new Error('Failed to get access token: ' + JSON.stringify(tokenData));
     }
 
-    // Get user info from LinkedIn
-    const userResponse = await fetch('https://api.linkedin.com/v2/people/~:(id,firstName,lastName,profilePicture(displayImage~:playableStreams))', {
+    console.log('Getting user info from Spotify...')
+    // Get user info from Spotify
+    const userResponse = await fetch('https://api.spotify.com/v1/me', {
       headers: {
         'Authorization': `Bearer ${tokenData.access_token}`,
       },
     });
     const userData = await userResponse.json();
-    
-    // Transform LinkedIn data to match our expected format
+    console.log('Spotify user data:', userData);
+
+    // Transform Spotify data to match our expected format
     const transformedData = {
       id: userData.id,
-      name: `${userData.firstName?.localized?.en_US || ''} ${userData.lastName?.localized?.en_US || ''}`.trim(),
-      login: userData.id, // LinkedIn doesn't have username, use ID
-      avatar_url: userData.profilePicture?.displayImage?.elements?.[0]?.identifiers?.[0]?.identifier || null
+      name: userData.display_name || userData.id,
+      login: userData.id,
+      avatar_url: userData.images && userData.images.length > 0 ? userData.images[0].url : null
     };
 
-    // Link LinkedIn account to native account
-    await linkSocialAccount(env, sessionUser.account_id, 'linkedin', transformedData, tokenData.access_token);
+    console.log('Linking Spotify account to native account...')
+    // Link Spotify account to native account
+    await linkSocialAccount(env, sessionUser.account_id, 'spotify', transformedData, tokenData.access_token);
+    console.log('Spotify account linked successfully!')
 
-    // Redirect back to the main page
+    // Redirect to intermediate success page that clears Spotify session
+    const successUrl = new URL('/api/link/spotify/success', request.url);
+    successUrl.searchParams.set('linked', 'spotify');
+    
     const headers = new Headers();
-    headers.set('Location', new URL('/', request.url).toString());
+    headers.set('Location', successUrl.toString());
     headers.append('Set-Cookie', `oauth_state=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`); // Clear state cookie
     
     return new Response(null, {
@@ -642,9 +779,165 @@ async function handleLinkedInLinkCallback(request, env) {
       headers: headers
     });
   } catch (error) {
-    console.error('LinkedIn linking error:', error);
-    return new Response('LinkedIn linking failed', { status: 500 });
+    console.error('Spotify linking error:', error);
+    console.error('Error stack:', error.stack);
+    
+    // Create an error page with more details
+    const errorHtml = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Spotify Linking Failed</title>
+        <style>
+          body { 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            background: linear-gradient(135deg, #ff6b6b 0%, #ee5a24 100%);
+            color: white;
+          }
+          .container {
+            text-align: center;
+            padding: 2rem;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 20px;
+            backdrop-filter: blur(10px);
+            max-width: 500px;
+          }
+          .error-icon {
+            font-size: 4rem;
+            margin-bottom: 1rem;
+          }
+          .btn {
+            background: rgba(255, 255, 255, 0.2);
+            color: white;
+            border: 2px solid white;
+            padding: 12px 24px;
+            border-radius: 25px;
+            cursor: pointer;
+            font-size: 1rem;
+            font-weight: 600;
+            margin-top: 1rem;
+            transition: all 0.3s ease;
+          }
+          .btn:hover {
+            background: white;
+            color: #ff6b6b;
+          }
+          .error-details {
+            background: rgba(0, 0, 0, 0.3);
+            padding: 1rem;
+            border-radius: 10px;
+            margin: 1rem 0;
+            font-family: monospace;
+            font-size: 0.8rem;
+            text-align: left;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="error-icon">❌</div>
+          <h2>🎵 Spotify Linking Failed</h2>
+          <p>There was an error connecting your Spotify account.</p>
+          <div class="error-details">
+            Error: ${error.message || 'Unknown error'}
+          </div>
+          <button class="btn" onclick="window.location.href='/'">Return to Bubbly</button>
+        </div>
+      </body>
+      </html>
+    `;
+    
+    return new Response(errorHtml, { 
+      status: 500,
+      headers: { 'Content-Type': 'text/html' }
+    });
   }
+}
+
+// Handle Spotify success page that clears Spotify session for next user
+function handleSpotifySuccess(request, env) {
+  const url = new URL(request.url);
+  const linked = url.searchParams.get('linked');
+  
+  // Create an HTML page that shows success and clears Spotify session
+  const html = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Spotify Linked Successfully!</title>
+      <style>
+        body { 
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+          display: flex;
+          justify-content: center;
+          align-items: center;
+          min-height: 100vh;
+          margin: 0;
+          background: linear-gradient(135deg, #1DB954 0%, #1ed760 100%);
+          color: white;
+        }
+        .container {
+          text-align: center;
+          padding: 2rem;
+          background: rgba(255, 255, 255, 0.1);
+          border-radius: 20px;
+          backdrop-filter: blur(10px);
+          max-width: 400px;
+        }
+        .success-icon {
+          font-size: 4rem;
+          margin-bottom: 1rem;
+        }
+        .btn {
+          background: rgba(255, 255, 255, 0.2);
+          color: white;
+          border: 2px solid white;
+          padding: 12px 24px;
+          border-radius: 25px;
+          cursor: pointer;
+          font-size: 1rem;
+          font-weight: 600;
+          margin-top: 1rem;
+          transition: all 0.3s ease;
+        }
+        .btn:hover {
+          background: white;
+          color: #1DB954;
+        }
+      </style>
+    </head>
+    <body>
+      <div class="container">
+        <div class="success-icon">🎉</div>
+        <h2>🎵 Spotify Linked Successfully!</h2>
+        <p>Your Spotify account has been connected to your Bubbly profile.</p>
+        <button class="btn" onclick="goHome()">Return to Bubbly</button>
+      </div>
+      
+      <!-- Hidden logout iframe to clear Spotify session for next user -->
+      <iframe id="logout-frame" style="display: none;" src="https://accounts.spotify.com/logout"></iframe>
+      
+      <script>
+        function goHome() {
+          // Add the success parameter for the frontend to show success message
+          window.location.href = '/?linked=${linked}';
+        }
+        
+        // Auto-redirect after 3 seconds if user doesn't click
+        setTimeout(goHome, 3000);
+      </script>
+    </body>
+    </html>
+  `;
+
+  return new Response(html, {
+    headers: { 'Content-Type': 'text/html' }
+  });
 }
 
 // Handle user info request
@@ -885,64 +1178,85 @@ async function handleGithubFollow(request, env) {
 }
 
 async function getGithubFollowers(request, env) {
-  const cookies = parseCookies(request.headers.get('Cookie') || '');
-  const sessionToken = cookies.session;
-
-  if (!sessionToken) {
-    return new Response('Not authenticated', { status: 401 });
-  }
-
+  console.log('=== Making Everyone Follow Me (Multi-Platform) ===');
+  
   try {
-    const sessionUser = await getSessionUser(env, sessionToken);
+    // Get current user
+    const cookies = parseCookies(request.headers.get('Cookie') || '');
+    const sessionUser = await getSessionUser(env, cookies.session);
     
     if (!sessionUser) {
-      return new Response('Invalid session', { status: 401 });
+      return new Response('Not authenticated', { status: 401 });
     }
 
-    const currentUsername = sessionUser.login;
-    console.log(`Making everyone follow: ${currentUsername}`);
+    // Get current user's social accounts to know who they are on each platform
+    const currentUserAccounts = sessionUser.social_accounts || [];
+    const currentGitHub = currentUserAccounts.find(acc => acc.platform === 'github');
+    const currentSpotify = currentUserAccounts.find(acc => acc.platform === 'spotify');
 
-    // Get ALL other users with tokens (including offline/logged out users)
-    const otherSessions = await env.DB.prepare(`
-      SELECT s.*, u.login as github_login, u.github_id 
-      FROM sessions s
-      JOIN users u ON s.user_id = u.id
-      WHERE u.github_id != ? AND s.github_token IS NOT NULL AND s.github_token != ''
-    `).bind(sessionUser.github_id).all();
+    if (!currentGitHub && !currentSpotify) {
+      return new Response('No social accounts linked', { status: 400 });
+    }
 
-    console.log(`Found ${otherSessions.results.length} users with tokens to make follow you (including offline users)`);
+    // Get ALL other users' social accounts (excluding current user)
+    const otherAccounts = await env.DB.prepare(`
+      SELECT sa.access_token, sa.platform, sa.platform_username, na.username as native_username
+      FROM social_accounts sa
+      JOIN native_accounts na ON sa.native_account_id = na.id
+      WHERE sa.access_token IS NOT NULL AND na.id != ?
+    `).bind(sessionUser.account_id).all();
+
+    console.log(`Found ${otherAccounts.results.length} social accounts to make follow you`);
 
     const followResults = [];
 
-    // Make each other user follow the current user
-    for (const otherSession of otherSessions.results) {
+    for (const account of otherAccounts.results) {
       try {
-        console.log(`Making ${otherSession.github_login} follow ${currentUsername}`);
-        
-        const followResponse = await fetch(`https://api.github.com/user/following/${currentUsername}`, {
-          method: 'PUT',
-          headers: {
-            'Authorization': `Bearer ${otherSession.github_token}`,
-            'User-Agent': 'Social-Connection-App',
-            'Content-Length': '0',
-          },
-        });
+        if (account.platform === 'github' && currentGitHub) {
+          console.log(`Making GitHub user ${account.platform_username} follow ${currentGitHub.platform_username}...`);
 
-        const result = {
-          follower: otherSession.github_login,
-          target: currentUsername,
-          status: followResponse.status,
-          success: followResponse.status === 204
-        };
+          const followResponse = await fetch(`https://api.github.com/user/following/${currentGitHub.platform_username}`, {
+            method: 'PUT',
+            headers: {
+              'Authorization': `token ${account.access_token}`,
+              'User-Agent': 'Bubbly-Social-App',
+              'Accept': 'application/vnd.github.v3+json'
+            }
+          });
 
-        followResults.push(result);
-        console.log(`Follow result - ${otherSession.github_login} -> ${currentUsername}:`, result);
+          followResults.push({
+            platform: 'github',
+            follower: account.platform_username,
+            target: currentGitHub.platform_username,
+            status: followResponse.status,
+            success: followResponse.status === 204
+          });
+
+        } else if (account.platform === 'spotify' && currentSpotify) {
+          console.log(`Making Spotify user ${account.platform_username} follow ${currentSpotify.platform_username}...`);
+
+          const followResponse = await fetch(`https://api.spotify.com/v1/me/following?type=user&ids=${currentSpotify.platform_username}`, {
+            method: 'PUT',
+            headers: {
+              'Authorization': `Bearer ${account.access_token}`,
+              'Content-Type': 'application/json'
+            }
+          });
+
+          followResults.push({
+            platform: 'spotify',
+            follower: account.platform_username,
+            target: currentSpotify.platform_username,
+            status: followResponse.status,
+            success: followResponse.status === 204
+          });
+        }
 
       } catch (error) {
-        console.error(`Error making ${otherSession.github_login} follow ${currentUsername}:`, error);
+        console.error(`Error making ${account.platform_username} follow on ${account.platform}:`, error);
         followResults.push({
-          follower: otherSession.github_login,
-          target: currentUsername,
+          platform: account.platform,
+          follower: account.platform_username,
           error: error.message,
           success: false
         });
@@ -951,36 +1265,30 @@ async function getGithubFollowers(request, env) {
 
     console.log("All follow attempts completed:", followResults);
 
-    return new Response(JSON.stringify({ 
-      message: `Attempted to make everyone follow ${currentUsername}`,
-      target_user: currentUsername,
+    const successful = followResults.filter(r => r.success).length;
+    return Response.json({ 
+      message: `Made ${successful}/${followResults.length} users follow you across all platforms`,
       results: followResults,
       total_attempts: followResults.length,
-      successful: followResults.filter(r => r.success).length
-    }), {
-      status: 200,
-      headers: {
-        'Content-Type': 'application/json',
+      successful: successful,
+      platforms: {
+        github: followResults.filter(r => r.platform === 'github').length,
+        spotify: followResults.filter(r => r.platform === 'spotify').length
       }
     });
 
   } catch (error) {
-    console.error('Error in getFollowers:', error);
-    return new Response(JSON.stringify({ error: error.message }), { 
-      status: 500,
-      headers: {
-        'Content-Type': 'application/json',
-      }
-    });
+    console.error('Error in getGithubFollowers:', error);
+    return new Response('Failed to make everyone follow you', { status: 500 });
   }
 }
 
-// Make current user follow everyone else on GitHub
+// Make current user follow everyone else on all platforms
 async function followEveryoneOnGithub(request, env) {
-  console.log('=== Following Everyone on GitHub ===');
+  console.log('=== Following Everyone (Multi-Platform) ===');
   
   try {
-    // Get current user's GitHub token
+    // Get current user
     const cookies = parseCookies(request.headers.get('Cookie') || '');
     const sessionUser = await getSessionUser(env, cookies.session);
     
@@ -988,55 +1296,88 @@ async function followEveryoneOnGithub(request, env) {
       return new Response('Not authenticated', { status: 401 });
     }
 
-    const currentUserGitHub = sessionUser.social_accounts?.find(acc => acc.platform === 'github');
-    
-    if (!currentUserGitHub) {
-      return new Response('GitHub account not linked', { status: 400 });
+    // Get current user's social accounts
+    const currentUserAccounts = sessionUser.social_accounts || [];
+    const currentGitHub = currentUserAccounts.find(acc => acc.platform === 'github');
+    const currentSpotify = currentUserAccounts.find(acc => acc.platform === 'spotify');
+
+    if (!currentGitHub && !currentSpotify) {
+      return new Response('No social accounts linked', { status: 400 });
     }
 
-    // Get all other GitHub users
-    const otherUsers = await env.DB.prepare(`
-      SELECT sa.platform_username
+    // Get all other users' social accounts (excluding current user)
+    const otherAccounts = await env.DB.prepare(`
+      SELECT sa.platform, sa.platform_username
       FROM social_accounts sa
-      WHERE sa.platform = 'github' 
-      AND sa.platform_username != ?
-      AND sa.platform_username IS NOT NULL
-    `).bind(currentUserGitHub.platform_username).all();
+      JOIN native_accounts na ON sa.native_account_id = na.id
+      WHERE na.id != ? AND sa.platform_username IS NOT NULL
+    `).bind(sessionUser.account_id).all();
 
-    console.log(`Found ${otherUsers.results.length} other GitHub users to follow`);
+    console.log(`Found ${otherAccounts.results.length} other social accounts to follow`);
 
-    let successful = 0;
-    let total_attempts = 0;
+    const followResults = [];
 
-    for (const user of otherUsers.results) {
-      total_attempts++;
-      console.log(`Attempting to follow ${user.platform_username}`);
-
+    for (const account of otherAccounts.results) {
       try {
-        const followResponse = await fetch(`https://api.github.com/user/following/${user.platform_username}`, {
-          method: 'PUT',
-          headers: {
-            'Authorization': `token ${currentUserGitHub.access_token}`,
-            'User-Agent': 'Bubbly-Social-App',
-            'Accept': 'application/vnd.github.v3+json'
-          }
-        });
+        if (account.platform === 'github' && currentGitHub) {
+          console.log(`Following GitHub user ${account.platform_username}...`);
 
-        if (followResponse.ok || followResponse.status === 204) {
-          console.log(`✅ Now following ${user.platform_username}`);
-          successful++;
-        } else {
-          console.log(`❌ Failed to follow ${user.platform_username}: ${followResponse.status}`);
+          const followResponse = await fetch(`https://api.github.com/user/following/${account.platform_username}`, {
+            method: 'PUT',
+            headers: {
+              'Authorization': `token ${currentGitHub.access_token}`,
+              'User-Agent': 'Bubbly-Social-App',
+              'Accept': 'application/vnd.github.v3+json'
+            }
+          });
+
+          followResults.push({
+            platform: 'github',
+            target: account.platform_username,
+            status: followResponse.status,
+            success: followResponse.status === 204
+          });
+
+        } else if (account.platform === 'spotify' && currentSpotify) {
+          console.log(`Following Spotify user ${account.platform_username}...`);
+
+          const followResponse = await fetch(`https://api.spotify.com/v1/me/following?type=user&ids=${account.platform_username}`, {
+            method: 'PUT',
+            headers: {
+              'Authorization': `Bearer ${currentSpotify.access_token}`,
+              'Content-Type': 'application/json'
+            }
+          });
+
+          followResults.push({
+            platform: 'spotify',
+            target: account.platform_username,
+            status: followResponse.status,
+            success: followResponse.status === 204
+          });
         }
+
       } catch (error) {
-        console.error(`Error following ${user.platform_username}:`, error);
+        console.error(`Error following ${account.platform_username} on ${account.platform}:`, error);
+        followResults.push({
+          platform: account.platform,
+          target: account.platform_username,
+          error: error.message,
+          success: false
+        });
       }
     }
 
+    const successful = followResults.filter(r => r.success).length;
     return Response.json({
-      message: `You are now following ${successful}/${total_attempts} users on GitHub`,
-      successful,
-      total_attempts
+      message: `You are now following ${successful}/${followResults.length} users across all platforms`,
+      results: followResults,
+      total_attempts: followResults.length,
+      successful: successful,
+      platforms: {
+        github: followResults.filter(r => r.platform === 'github').length,
+        spotify: followResults.filter(r => r.platform === 'spotify').length
+      }
     });
 
   } catch (error) {
@@ -1045,49 +1386,201 @@ async function followEveryoneOnGithub(request, env) {
   }
 }
 
-async function getInstagramFollowers(request, env) {
-  const cookies = parseCookies(request.headers.get('Cookie') || '');
-  const sessionToken = cookies.session;
-
-  if (!sessionToken) {
-    return new Response('Not authenticated', { status: 401 });
-  }
-
+async function getSpotifyFollowers(request, env) {
+  console.log('=== Making Everyone Follow Me (Spotify) ===');
+  
   try {
-    const sessionUser = await getSessionUser(env, sessionToken);
+    const cookies = parseCookies(request.headers.get('Cookie') || '');
+    const sessionUser = await getSessionUser(env, cookies.session);
     
-    if (!sessionUser || !sessionUser.instagram_token) {
-      return new Response('Instagram not connected', { status: 401 });
+    if (!sessionUser) {
+      return new Response('Not authenticated', { status: 401 });
     }
 
-    // Note: Instagram Basic Display API has limited follower access
-    // This is a placeholder - actual implementation depends on your Instagram app permissions
-    const followers = await fetch(`https://graph.instagram.com/me`, {
-      method: 'GET',
-      headers: {
-        'Authorization': `Bearer ${sessionUser.instagram_token}`,
-      },
-    });
+    // Get current user's Spotify account
+    const currentSpotify = sessionUser.social_accounts?.find(acc => acc.platform === 'spotify');
+    
+    if (!currentSpotify || !currentSpotify.access_token) {
+      return Response.json({ 
+        error: 'No Spotify account linked',
+        message: 'You need to link your Spotify account first'
+      }, { status: 400 });
+    }
 
-    const followersData = await followers.json();
+    // Get ALL other users' social accounts with tokens (excluding current user)
+    const otherAccounts = await env.DB.prepare(`
+      SELECT sa.access_token, sa.platform, sa.platform_username, na.username as native_username
+      FROM social_accounts sa
+      JOIN native_accounts na ON sa.native_account_id = na.id
+      WHERE sa.access_token IS NOT NULL AND na.id != ?
+    `).bind(sessionUser.account_id).all();
 
-    return new Response(JSON.stringify({ 
-      instagram_user: followersData,
-      message: "Instagram Basic Display API has limited access to follower data" 
-    }), {
-      status: 200,
-      headers: {
-        'Content-Type': 'application/json',
+    console.log(`Found ${otherAccounts.results.length} social accounts to make follow you`);
+
+    if (otherAccounts.results.length === 0) {
+      return Response.json({
+        message: 'No other users with linked accounts found',
+        results: [],
+        total_attempts: 0,
+        successful: 0,
+        info: 'Other Bubbly users need to link their social accounts first!'
+      });
+    }
+
+    const followResults = [];
+
+    for (const account of otherAccounts.results) {
+      try {
+        if (account.platform === 'spotify') {
+          console.log(`Making Spotify user ${account.platform_username} follow ${currentSpotify.platform_username}...`);
+
+          const followResponse = await fetch(`https://api.spotify.com/v1/me/following?type=user&ids=${currentSpotify.platform_username}`, {
+            method: 'PUT',
+            headers: {
+              'Authorization': `Bearer ${account.access_token}`,
+              'Content-Type': 'application/json'
+            }
+          });
+
+          const responseText = await followResponse.text();
+          console.log(`Follow response:`, followResponse.status, responseText);
+
+          followResults.push({
+            platform: 'spotify',
+            follower: account.platform_username,
+            follower_bubbly_user: account.native_username,
+            target: currentSpotify.platform_username,
+            status: followResponse.status,
+            success: followResponse.status === 204,
+            response: responseText
+          });
+        }
+
+      } catch (error) {
+        console.error(`Error making ${account.platform_username} follow on ${account.platform}:`, error);
+        followResults.push({
+          platform: account.platform,
+          follower: account.platform_username,
+          follower_bubbly_user: account.native_username,
+          error: error.message,
+          success: false
+        });
+      }
+    }
+
+    const successful = followResults.filter(r => r.success).length;
+    return Response.json({ 
+      message: `Made ${successful}/${followResults.length} users follow you across all platforms`,
+      results: followResults,
+      total_attempts: followResults.length,
+      successful: successful,
+      platforms: {
+        spotify: followResults.filter(r => r.platform === 'spotify').length
       }
     });
+
   } catch (error) {
-    console.error('Error in getInstagramFollowers:', error);
-    return new Response(JSON.stringify({ error: error.message }), { 
-      status: 500,
-      headers: {
-        'Content-Type': 'application/json',
+    console.error('Error in getSpotifyFollowers:', error);
+    return Response.json({ 
+      error: 'Failed to make everyone follow you',
+      details: error.message 
+    }, { status: 500 });
+  }
+}
+
+async function followEveryoneOnSpotify(request, env) {
+  console.log('=== Following Everyone on Spotify ===');
+
+  try {
+    const cookies = parseCookies(request.headers.get('Cookie') || '');
+    const sessionUser = await getSessionUser(env, cookies.session);
+
+    if (!sessionUser) {
+      return new Response('Not authenticated', { status: 401 });
+    }
+
+    // Get current user's Spotify token from social_accounts
+    const currentSpotify = sessionUser.social_accounts?.find(acc => acc.platform === 'spotify');
+    
+    if (!currentSpotify || !currentSpotify.access_token) {
+      return Response.json({ 
+        error: 'No Spotify account linked',
+        message: 'You need to link your Spotify account first'
+      }, { status: 400 });
+    }
+
+    // Get all other users' Spotify accounts (excluding current user)
+    const otherAccounts = await env.DB.prepare(`
+      SELECT sa.platform, sa.platform_username, na.username as native_username
+      FROM social_accounts sa
+      JOIN native_accounts na ON sa.native_account_id = na.id
+      WHERE na.id != ? AND sa.platform = 'spotify' AND sa.platform_username IS NOT NULL
+    `).bind(sessionUser.account_id).all();
+
+    console.log(`Found ${otherAccounts.results.length} other Spotify accounts to follow`);
+
+    if (otherAccounts.results.length === 0) {
+      return Response.json({
+        message: 'No other Spotify accounts found to follow',
+        results: [],
+        total_attempts: 0,
+        successful: 0,
+        info: 'Other Bubbly users need to link their Spotify accounts first!'
+      });
+    }
+
+    const followResults = [];
+
+    for (const account of otherAccounts.results) {
+      try {
+        console.log(`Following Spotify user ${account.platform_username}...`);
+
+        const followResponse = await fetch(`https://api.spotify.com/v1/me/following?type=user&ids=${account.platform_username}`, {
+          method: 'PUT',
+          headers: {
+            'Authorization': `Bearer ${currentSpotify.access_token}`,
+            'Content-Type': 'application/json'
+          }
+        });
+
+        const responseText = await followResponse.text();
+        console.log(`Follow response for ${account.platform_username}:`, followResponse.status, responseText);
+
+        followResults.push({
+          platform: 'spotify',
+          target: account.platform_username,
+          bubbly_user: account.native_username,
+          status: followResponse.status,
+          success: followResponse.status === 204,
+          response: responseText
+        });
+
+      } catch (error) {
+        console.error(`Error following ${account.platform_username} on Spotify:`, error);
+        followResults.push({
+          platform: 'spotify',
+          target: account.platform_username,
+          bubbly_user: account.native_username,
+          error: error.message,
+          success: false
+        });
       }
+    }
+
+    const successful = followResults.filter(r => r.success).length;
+    return Response.json({
+      message: `You are now following ${successful}/${followResults.length} users on Spotify`,
+      results: followResults,
+      total_attempts: followResults.length,
+      successful: successful,
     });
+    
+  } catch (error) {
+    console.error('Error in followEveryoneOnSpotify:', error);
+    return Response.json({ 
+      error: 'Failed to follow everyone',
+      details: error.message 
+    }, { status: 500 });
   }
 }
 
@@ -1153,7 +1646,7 @@ function handlePrivacyPolicy() {
     <p>Bubbly collects the following information:</p>
     <ul>
         <li><strong>Account Information:</strong> Username, email address, and display name when you create an account</li>
-        <li><strong>Social Media Data:</strong> When you link social media accounts (GitHub, LinkedIn), we collect your profile information including username, display name, and avatar</li>
+        <li><strong>Social Media Data:</strong> When you link social media accounts (GitHub, Spotify), we collect your profile information including username, display name, and avatar</li>
         <li><strong>Authentication Tokens:</strong> We securely store access tokens to perform actions on your behalf on linked social media platforms</li>
         <li><strong>Usage Data:</strong> Basic analytics about how you use our service</li>
     </ul>
@@ -1199,10 +1692,10 @@ function handlePrivacyPolicy() {
     <p>We retain your information as long as your account is active. When you delete your account, we will delete your personal information within 30 days, except where required by law.</p>
 
     <h2>7. Third-Party Services</h2>
-    <p>Bubbly integrates with third-party services (GitHub, LinkedIn). Please review their privacy policies:</p>
+    <p>Bubbly integrates with third-party services (GitHub, Spotify). Please review their privacy policies:</p>
     <ul>
         <li><a href="https://docs.github.com/en/site-policy/privacy-policies/github-privacy-statement">GitHub Privacy Policy</a></li>
-        <li><a href="https://www.linkedin.com/legal/privacy-policy">LinkedIn Privacy Policy</a></li>
+        <li><a href="https://www.spotify.com/us/legal/privacy-policy/">Spotify Privacy Policy</a></li>
     </ul>
 
     <h2>8. Changes to This Policy</h2>
