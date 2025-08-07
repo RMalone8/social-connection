@@ -61,8 +61,49 @@ async function handleApiRoutes(request, env, url) {
     return handleUserInfo(request, env);
   }
 
+  if (url.pathname === "/api/user/delete" && request.method === "DELETE") {
+    return handleDeleteAccount(request, env);
+  }
+
   if (url.pathname === "/api/users/all") {
     return handleGetAllUsers(request, env);
+  }
+
+  // Bubble management routes
+  if (url.pathname === "/api/bubbles" && request.method === "GET") {
+    return handleGetUserBubbles(request, env);
+  }
+
+  if (url.pathname === "/api/bubbles" && request.method === "POST") {
+    return handleCreateBubble(request, env);
+  }
+
+  if (url.pathname.startsWith("/api/bubbles/") && url.pathname.endsWith("/join") && request.method === "POST") {
+    return handleJoinBubble(request, env);
+  }
+
+  if (url.pathname.startsWith("/api/bubbles/") && url.pathname.endsWith("/leave") && request.method === "POST") {
+    return handleLeaveBubble(request, env);
+  }
+
+  if (url.pathname.startsWith("/api/bubbles/") && url.pathname.endsWith("/delete") && request.method === "DELETE") {
+    return handleDeleteBubble(request, env);
+  }
+
+  if (url.pathname.startsWith("/api/bubbles/") && url.pathname.endsWith("/members") && request.method === "GET") {
+    return handleGetBubbleMembers(request, env);
+  }
+
+  if (url.pathname === "/api/bubbles/public" && request.method === "GET") {
+    return handleGetPublicBubbles(request, env);
+  }
+
+  if (url.pathname.startsWith("/api/bubbles/") && url.pathname.endsWith("/kick") && request.method === "POST") {
+    return handleKickMember(request, env);
+  }
+
+  if (url.pathname.startsWith("/api/bubbles/") && url.pathname.endsWith("/promote") && request.method === "POST") {
+    return handlePromoteMember(request, env);
   }
 
   if (url.pathname === "/api/followers") {
@@ -1723,4 +1764,542 @@ function handlePrivacyPolicy() {
       'Cache-Control': 'public, max-age=3600' // Cache for 1 hour
     }
   });
+}
+
+// Bubble Management Functions
+
+// Get user's bubbles (created and joined)
+async function handleGetUserBubbles(request, env) {
+  try {
+    const cookies = parseCookies(request.headers.get('Cookie') || '');
+    const sessionUser = await getSessionUser(env, cookies.session);
+    
+    if (!sessionUser) {
+      return new Response('Not authenticated', { status: 401 });
+    }
+
+    // Get bubbles the user is a member of
+    const bubbles = await env.DB.prepare(`
+      SELECT 
+        b.id,
+        b.name,
+        b.description,
+        b.is_public,
+        b.invite_code,
+        b.max_members,
+        b.created_at,
+        bm.role,
+        COUNT(bm2.user_id) as member_count,
+        na.display_name as creator_name
+      FROM bubbles b
+      JOIN bubble_memberships bm ON b.id = bm.bubble_id
+      JOIN native_accounts na ON b.creator_id = na.id
+      LEFT JOIN bubble_memberships bm2 ON b.id = bm2.bubble_id
+      WHERE bm.user_id = ?
+      GROUP BY b.id, b.name, b.description, b.is_public, b.invite_code, b.max_members, b.created_at, bm.role, na.display_name
+      ORDER BY b.created_at DESC
+    `).bind(sessionUser.account_id).all();
+
+    return Response.json(bubbles.results);
+  } catch (error) {
+    console.error('Error getting user bubbles:', error);
+    return new Response('Server error', { status: 500 });
+  }
+}
+
+// Create a new bubble
+async function handleCreateBubble(request, env) {
+  try {
+    const cookies = parseCookies(request.headers.get('Cookie') || '');
+    const sessionUser = await getSessionUser(env, cookies.session);
+    
+    if (!sessionUser) {
+      return new Response('Not authenticated', { status: 401 });
+    }
+
+    const { name, description, isPublic, maxMembers } = await request.json();
+    
+    if (!name || name.trim().length === 0) {
+      return Response.json({ error: 'Bubble name is required' }, { status: 400 });
+    }
+
+    // Generate invite code
+    const inviteCode = Math.random().toString(36).substring(2, 10).toUpperCase();
+
+    // Create bubble
+    const bubbleResult = await env.DB.prepare(`
+      INSERT INTO bubbles (name, description, creator_id, is_public, invite_code, max_members)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).bind(
+      name.trim(),
+      description?.trim() || null,
+      sessionUser.account_id,
+      isPublic !== false, // Default to true
+      inviteCode,
+      maxMembers || 50
+    ).run();
+
+    // Add creator as member with creator role
+    await env.DB.prepare(`
+      INSERT INTO bubble_memberships (bubble_id, user_id, role)
+      VALUES (?, ?, 'creator')
+    `).bind(bubbleResult.meta.last_row_id, sessionUser.account_id).run();
+
+    // Return the created bubble
+    const bubble = await env.DB.prepare(`
+      SELECT 
+        b.id,
+        b.name,
+        b.description,
+        b.is_public,
+        b.invite_code,
+        b.max_members,
+        b.created_at,
+        'creator' as role,
+        1 as member_count,
+        ? as creator_name
+      FROM bubbles b
+      WHERE b.id = ?
+    `).bind(sessionUser.display_name, bubbleResult.meta.last_row_id).first();
+
+    return Response.json(bubble);
+  } catch (error) {
+    console.error('Error creating bubble:', error);
+    return new Response('Server error', { status: 500 });
+  }
+}
+
+// Join a bubble by ID or invite code
+async function handleJoinBubble(request, env) {
+  try {
+    const cookies = parseCookies(request.headers.get('Cookie') || '');
+    const sessionUser = await getSessionUser(env, cookies.session);
+    
+    if (!sessionUser) {
+      return new Response('Not authenticated', { status: 401 });
+    }
+
+    const url = new URL(request.url);
+    const bubbleId = url.pathname.split('/')[3];
+    const { inviteCode } = await request.json();
+
+    let bubble;
+    
+    if (inviteCode) {
+      // Join by invite code
+      bubble = await env.DB.prepare(`
+        SELECT * FROM bubbles WHERE invite_code = ?
+      `).bind(inviteCode).first();
+    } else {
+      // Join by ID (only if public)
+      bubble = await env.DB.prepare(`
+        SELECT * FROM bubbles WHERE id = ? AND is_public = TRUE
+      `).bind(bubbleId).first();
+    }
+
+    if (!bubble) {
+      return Response.json({ error: 'Bubble not found or not accessible' }, { status: 404 });
+    }
+
+    // Check if already a member
+    const existingMembership = await env.DB.prepare(`
+      SELECT id FROM bubble_memberships WHERE bubble_id = ? AND user_id = ?
+    `).bind(bubble.id, sessionUser.account_id).first();
+
+    if (existingMembership) {
+      return Response.json({ error: 'Already a member of this bubble' }, { status: 400 });
+    }
+
+    // Check member limit
+    const memberCount = await env.DB.prepare(`
+      SELECT COUNT(*) as count FROM bubble_memberships WHERE bubble_id = ?
+    `).bind(bubble.id).first();
+
+    if (memberCount.count >= bubble.max_members) {
+      return Response.json({ error: 'Bubble is full' }, { status: 400 });
+    }
+
+    // Add user to bubble
+    await env.DB.prepare(`
+      INSERT INTO bubble_memberships (bubble_id, user_id, role)
+      VALUES (?, ?, 'member')
+    `).bind(bubble.id, sessionUser.account_id).run();
+
+    return Response.json({ message: 'Successfully joined bubble', bubble_name: bubble.name });
+  } catch (error) {
+    console.error('Error joining bubble:', error);
+    return new Response('Server error', { status: 500 });
+  }
+}
+
+// Leave a bubble
+async function handleLeaveBubble(request, env) {
+  try {
+    const cookies = parseCookies(request.headers.get('Cookie') || '');
+    const sessionUser = await getSessionUser(env, cookies.session);
+    
+    if (!sessionUser) {
+      return new Response('Not authenticated', { status: 401 });
+    }
+
+    const url = new URL(request.url);
+    const bubbleId = url.pathname.split('/')[3];
+
+    // Check if user is a member
+    const membership = await env.DB.prepare(`
+      SELECT role FROM bubble_memberships WHERE bubble_id = ? AND user_id = ?
+    `).bind(bubbleId, sessionUser.account_id).first();
+
+    if (!membership) {
+      return Response.json({ error: 'Not a member of this bubble' }, { status: 400 });
+    }
+
+    if (membership.role === 'creator') {
+      return Response.json({ error: 'Creator cannot leave bubble. Delete it instead.' }, { status: 400 });
+    }
+
+    // Remove membership
+    await env.DB.prepare(`
+      DELETE FROM bubble_memberships WHERE bubble_id = ? AND user_id = ?
+    `).bind(bubbleId, sessionUser.account_id).run();
+
+    return Response.json({ message: 'Successfully left bubble' });
+  } catch (error) {
+    console.error('Error leaving bubble:', error);
+    return new Response('Server error', { status: 500 });
+  }
+}
+
+// Delete a bubble (creator only)
+async function handleDeleteBubble(request, env) {
+  try {
+    const cookies = parseCookies(request.headers.get('Cookie') || '');
+    const sessionUser = await getSessionUser(env, cookies.session);
+    
+    if (!sessionUser) {
+      return new Response('Not authenticated', { status: 401 });
+    }
+
+    const url = new URL(request.url);
+    const bubbleId = url.pathname.split('/')[3];
+
+    // Check if user is the creator
+    const bubble = await env.DB.prepare(`
+      SELECT creator_id FROM bubbles WHERE id = ?
+    `).bind(bubbleId).first();
+
+    if (!bubble) {
+      return Response.json({ error: 'Bubble not found' }, { status: 404 });
+    }
+
+    if (bubble.creator_id !== sessionUser.account_id) {
+      return Response.json({ error: 'Only the creator can delete this bubble' }, { status: 403 });
+    }
+
+    // Delete bubble (memberships will be deleted due to CASCADE)
+    await env.DB.prepare(`
+      DELETE FROM bubbles WHERE id = ?
+    `).bind(bubbleId).run();
+
+    return Response.json({ message: 'Bubble deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting bubble:', error);
+    return new Response('Server error', { status: 500 });
+  }
+}
+
+// Get bubble members
+async function handleGetBubbleMembers(request, env) {
+  try {
+    const cookies = parseCookies(request.headers.get('Cookie') || '');
+    const sessionUser = await getSessionUser(env, cookies.session);
+    
+    if (!sessionUser) {
+      return new Response('Not authenticated', { status: 401 });
+    }
+
+    const url = new URL(request.url);
+    const bubbleId = url.pathname.split('/')[3];
+    
+    console.log('Getting bubble members for bubbleId:', bubbleId, 'user:', sessionUser.account_id);
+
+    // Check if user is a member of this bubble
+    const membership = await env.DB.prepare(`
+      SELECT id FROM bubble_memberships WHERE bubble_id = ? AND user_id = ?
+    `).bind(bubbleId, sessionUser.account_id).first();
+
+    if (!membership) {
+      console.log('User is not a member of bubble:', bubbleId);
+      return Response.json({ error: 'Not a member of this bubble' }, { status: 403 });
+    }
+
+    // Get bubble info and members, plus current user's role
+    const bubble = await env.DB.prepare(`
+      SELECT b.id, b.name, b.description, b.invite_code, bm.role as user_role 
+      FROM bubbles b
+      JOIN bubble_memberships bm ON b.id = bm.bubble_id 
+      WHERE b.id = ? AND bm.user_id = ?
+    `).bind(bubbleId, sessionUser.account_id).first();
+
+    const members = await env.DB.prepare(`
+      SELECT 
+        na.id,
+        na.username,
+        na.display_name,
+        bm.role,
+        bm.joined_at,
+        sa.platform,
+        sa.platform_username,
+        sa.avatar_url
+      FROM bubble_memberships bm
+      JOIN native_accounts na ON bm.user_id = na.id
+      LEFT JOIN social_accounts sa ON na.id = sa.native_account_id
+      WHERE bm.bubble_id = ?
+      ORDER BY 
+        CASE bm.role 
+          WHEN 'creator' THEN 1 
+          WHEN 'admin' THEN 2 
+          ELSE 3 
+        END,
+        bm.joined_at ASC
+    `).bind(bubbleId).all();
+
+    // Group social accounts by user
+    const userMap = new Map();
+    
+    members.results.forEach(row => {
+      if (!userMap.has(row.id)) {
+        userMap.set(row.id, {
+          id: row.id,
+          username: row.username,
+          display_name: row.display_name,
+          role: row.role,
+          joined_at: row.joined_at,
+          social_accounts: []
+        });
+      }
+      
+      if (row.platform) {
+        userMap.get(row.id).social_accounts.push({
+          platform: row.platform,
+          platform_username: row.platform_username,
+          avatar_url: row.avatar_url
+        });
+      }
+    });
+
+    const membersData = Array.from(userMap.values());
+    
+    console.log('Returning bubble data:', bubble);
+    console.log('Returning members count:', membersData.length);
+
+    return Response.json({
+      bubble: bubble,
+      members: membersData
+    });
+  } catch (error) {
+    console.error('Error getting bubble members:', error);
+    return new Response('Server error', { status: 500 });
+  }
+}
+
+// Get public bubbles for discovery
+async function handleGetPublicBubbles(request, env) {
+  try {
+    const cookies = parseCookies(request.headers.get('Cookie') || '');
+    const sessionUser = await getSessionUser(env, cookies.session);
+    
+    if (!sessionUser) {
+      return new Response('Not authenticated', { status: 401 });
+    }
+
+    // Get public bubbles that user is not already a member of
+    const bubbles = await env.DB.prepare(`
+      SELECT 
+        b.id,
+        b.name,
+        b.description,
+        b.max_members,
+        b.created_at,
+        COUNT(bm.user_id) as member_count,
+        na.display_name as creator_name
+      FROM bubbles b
+      JOIN native_accounts na ON b.creator_id = na.id
+      LEFT JOIN bubble_memberships bm ON b.id = bm.bubble_id
+      WHERE b.is_public = TRUE 
+        AND b.id NOT IN (
+          SELECT bubble_id FROM bubble_memberships WHERE user_id = ?
+        )
+      GROUP BY b.id, b.name, b.description, b.max_members, b.created_at, na.display_name
+      ORDER BY b.created_at DESC
+      LIMIT 20
+    `).bind(sessionUser.account_id).all();
+
+    return Response.json(bubbles.results);
+  } catch (error) {
+    console.error('Error getting public bubbles:', error);
+    return new Response('Server error', { status: 500 });
+  }
+}
+
+// Kick a member from bubble (creator/admin only)
+async function handleKickMember(request, env) {
+  try {
+    const cookies = parseCookies(request.headers.get('Cookie') || '');
+    const sessionUser = await getSessionUser(env, cookies.session);
+    
+    if (!sessionUser) {
+      return new Response('Not authenticated', { status: 401 });
+    }
+
+    const url = new URL(request.url);
+    const bubbleId = url.pathname.split('/')[3];
+    const { userId } = await request.json();
+
+    // Check if current user is creator or admin
+    const userMembership = await env.DB.prepare(`
+      SELECT role FROM bubble_memberships WHERE bubble_id = ? AND user_id = ?
+    `).bind(bubbleId, sessionUser.account_id).first();
+
+    if (!userMembership || (userMembership.role !== 'creator' && userMembership.role !== 'admin')) {
+      return Response.json({ error: 'Only creators and admins can kick members' }, { status: 403 });
+    }
+
+    // Check target user's role - creators can kick anyone, admins can't kick creators or other admins
+    const targetMembership = await env.DB.prepare(`
+      SELECT role FROM bubble_memberships WHERE bubble_id = ? AND user_id = ?
+    `).bind(bubbleId, userId).first();
+
+    if (!targetMembership) {
+      return Response.json({ error: 'User is not a member of this bubble' }, { status: 400 });
+    }
+
+    if (userMembership.role === 'admin') {
+      if (targetMembership.role === 'creator' || targetMembership.role === 'admin') {
+        return Response.json({ error: 'Admins cannot kick creators or other admins' }, { status: 403 });
+      }
+    }
+
+    // Can't kick yourself
+    if (userId === sessionUser.account_id) {
+      return Response.json({ error: 'You cannot kick yourself' }, { status: 400 });
+    }
+
+    // Remove the member
+    await env.DB.prepare(`
+      DELETE FROM bubble_memberships WHERE bubble_id = ? AND user_id = ?
+    `).bind(bubbleId, userId).run();
+
+    return Response.json({ message: 'Member kicked successfully' });
+  } catch (error) {
+    console.error('Error kicking member:', error);
+    return new Response('Server error', { status: 500 });
+  }
+}
+
+// Promote member to admin (creator only)
+async function handlePromoteMember(request, env) {
+  try {
+    const cookies = parseCookies(request.headers.get('Cookie') || '');
+    const sessionUser = await getSessionUser(env, cookies.session);
+    
+    if (!sessionUser) {
+      return new Response('Not authenticated', { status: 401 });
+    }
+
+    const url = new URL(request.url);
+    const bubbleId = url.pathname.split('/')[3];
+    const { userId, action } = await request.json(); // action: 'promote' or 'demote'
+
+    // Check if current user is creator
+    const userMembership = await env.DB.prepare(`
+      SELECT role FROM bubble_memberships WHERE bubble_id = ? AND user_id = ?
+    `).bind(bubbleId, sessionUser.account_id).first();
+
+    if (!userMembership || userMembership.role !== 'creator') {
+      return Response.json({ error: 'Only creators can promote/demote members' }, { status: 403 });
+    }
+
+    // Check target user exists
+    const targetMembership = await env.DB.prepare(`
+      SELECT role FROM bubble_memberships WHERE bubble_id = ? AND user_id = ?
+    `).bind(bubbleId, userId).first();
+
+    if (!targetMembership) {
+      return Response.json({ error: 'User is not a member of this bubble' }, { status: 400 });
+    }
+
+    // Can't promote/demote yourself
+    if (userId === sessionUser.account_id) {
+      return Response.json({ error: 'You cannot change your own role' }, { status: 400 });
+    }
+
+    const newRole = action === 'promote' ? 'admin' : 'member';
+    
+    // Update the member's role
+    await env.DB.prepare(`
+      UPDATE bubble_memberships SET role = ? WHERE bubble_id = ? AND user_id = ?
+    `).bind(newRole, bubbleId, userId).run();
+
+    return Response.json({ 
+      message: `Member ${action === 'promote' ? 'promoted to admin' : 'demoted to member'} successfully`,
+      newRole: newRole
+    });
+  } catch (error) {
+    console.error('Error promoting member:', error);
+    return new Response('Server error', { status: 500 });
+  }
+}
+
+// Handle delete account - permanently remove user and related data
+async function handleDeleteAccount(request, env) {
+  try {
+    const cookies = parseCookies(request.headers.get('Cookie') || '');
+    const sessionUser = await getSessionUser(env, cookies.session);
+
+    if (!sessionUser) {
+      return new Response('Not authenticated', { status: 401 });
+    }
+
+    const userId = sessionUser.account_id;
+
+    // 1) Remove memberships for this user
+    await env.DB.prepare(`
+      DELETE FROM bubble_memberships WHERE user_id = ?
+    `).bind(userId).run();
+
+    // 2) Delete bubbles created by this user (will cascade remove memberships)
+    await env.DB.prepare(`
+      DELETE FROM bubbles WHERE creator_id = ?
+    `).bind(userId).run();
+
+    // 3) Delete social accounts linked to this user
+    await env.DB.prepare(`
+      DELETE FROM social_accounts WHERE native_account_id = ?
+    `).bind(userId).run();
+
+    // 4) Delete sessions for this user
+    await env.DB.prepare(`
+      DELETE FROM sessions WHERE native_account_id = ?
+    `).bind(userId).run();
+
+    // 5) Finally delete the native account
+    await env.DB.prepare(`
+      DELETE FROM native_accounts WHERE id = ?
+    `).bind(userId).run();
+
+    return new Response(JSON.stringify({ success: true, message: 'Account deleted' }), {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/json',
+        'Set-Cookie': 'session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0'
+      }
+    });
+  } catch (error) {
+    console.error('Error deleting account:', error);
+    return new Response(JSON.stringify({ error: 'Failed to delete account' }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
 }

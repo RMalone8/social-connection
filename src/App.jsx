@@ -4,11 +4,24 @@ import './App.css'
 function App() {
   const [user, setUser] = useState(null)
   const [loading, setLoading] = useState(true)
-  const [loginForm, setLoginForm] = useState(true) // true for login, false for register
-  const [allUsers, setAllUsers] = useState([])
-  const [isLoadingUsers, setIsLoadingUsers] = useState(false)
-  const [fetchUsersTimeout, setFetchUsersTimeout] = useState(null) // All users for bubble display
+  const [loginForm, setLoginForm] = useState(true)
   
+  // Dashboard states
+  const [currentView, setCurrentView] = useState('dashboard') // 'dashboard', 'bubble', 'discover'
+  const [userBubbles, setUserBubbles] = useState([])
+  const [publicBubbles, setPublicBubbles] = useState([])
+  const [selectedBubble, setSelectedBubble] = useState(null)
+  const [bubbleMembers, setBubbleMembers] = useState([])
+  
+  // Modal states
+  const [showCreateModal, setShowCreateModal] = useState(false)
+  const [showJoinModal, setShowJoinModal] = useState(false)
+  const [inviteCode, setInviteCode] = useState('')
+
+  // Bubble positioning states
+  const [isFloatingEnabled, setIsFloatingEnabled] = useState(true)
+  const [bubblePositions, setBubblePositions] = useState(new Map())
+
   useEffect(() => {
     checkAuthStatus()
     
@@ -16,15 +29,10 @@ function App() {
     const urlParams = new URLSearchParams(window.location.search)
     const linkedPlatform = urlParams.get('linked')
     if (linkedPlatform) {
-      // Show success message and refresh data after a short delay
-      setTimeout(async () => {
+      // Show success message
+      setTimeout(() => {
         alert(`🎉 ${linkedPlatform.charAt(0).toUpperCase() + linkedPlatform.slice(1)} account linked successfully!`)
-        
-        console.log('=== LINKING SUCCESS: Refreshing data ===')
-        // Only refresh user data - the useEffect will handle fetchAllUsers
-        await checkAuthStatus()
-        console.log('=== LINKING SUCCESS: User data refreshed ===')
-      }, 800)
+      }, 500)
       
       // Clean up URL
       const newUrl = window.location.pathname
@@ -33,33 +41,9 @@ function App() {
   }, [])
 
   useEffect(() => {
-    console.log('=== USER EFFECT: User state changed ===', user)
     if (user) {
-      console.log('=== USER EFFECT: User exists, fetching all users immediately ===')
-      fetchAllUsers(true) // Immediate fetch when user changes
-    } else {
-      console.log('=== USER EFFECT: No user, clearing allUsers ===')
-      setAllUsers([])
+      fetchUserBubbles()
     }
-  }, [user])
-
-  // Refresh data when user comes back to the page (after OAuth redirect)
-  useEffect(() => {
-    const handleFocus = async () => {
-      if (user) {
-        console.log('=== FOCUS: Page focused, refreshing data ===')
-        await checkAuthStatus() // Refresh user data
-        console.log('=== FOCUS: checkAuthStatus completed ===')
-        // Small delay to ensure backend is updated
-        setTimeout(() => {
-          console.log('=== FOCUS: Calling fetchAllUsers after delay ===')
-          fetchAllUsers() // Refresh all users
-        }, 300)
-      }
-    }
-
-    window.addEventListener('focus', handleFocus)
-    return () => window.removeEventListener('focus', handleFocus)
   }, [user])
 
   const checkAuthStatus = async () => {
@@ -70,49 +54,195 @@ function App() {
         setUser(userData)
       }
     } catch (error) {
-      console.error('Error checking auth status:', error)
+      console.error('Auth check failed:', error)
     } finally {
       setLoading(false)
     }
   }
 
-  const fetchAllUsers = async (immediate = false) => {
-    // Clear any pending timeout
-    if (fetchUsersTimeout) {
-      clearTimeout(fetchUsersTimeout)
-      setFetchUsersTimeout(null)
-    }
-
-        const doFetch = async () => {
-      try {
-        setIsLoadingUsers(true)
-        console.log('=== FETCH: Starting fetchAllUsers ===')
-        const response = await fetch('/api/users/all')
-        if (response.ok) {
-          const users = await response.json()
-          console.log('=== FETCH: Fetched users count:', users.length, 'users:', users)
-          console.log('=== FETCH: Setting allUsers to:', users)
-          setAllUsers(users)
-          console.log('=== FETCH: allUsers state should now be updated ===')
-        } else {
-          console.error('=== FETCH: Failed to fetch users, response not ok:', response.status)
-          // Don't clear existing users on error
-        }
-      } catch (error) {
-        console.error('=== FETCH: Failed to fetch users:', error)
-        // Don't clear existing users on error
-      } finally {
-        setIsLoadingUsers(false)
-        console.log('=== FETCH: Completed fetchAllUsers ===')
+  const fetchUserBubbles = async () => {
+    try {
+      const response = await fetch('/api/bubbles')
+      if (response.ok) {
+        const bubbles = await response.json()
+        setUserBubbles(bubbles)
       }
+    } catch (error) {
+      console.error('Failed to fetch bubbles:', error)
     }
+  }
 
-    if (immediate) {
-      await doFetch()
+  const fetchPublicBubbles = async () => {
+    try {
+      const response = await fetch('/api/bubbles/public')
+      if (response.ok) {
+        const bubbles = await response.json()
+        setPublicBubbles(bubbles)
+      }
+    } catch (error) {
+      console.error('Failed to fetch public bubbles:', error)
+    }
+  }
+
+  const fetchBubbleMembers = async (bubbleId, preservePositions = false) => {
+    try {
+      const response = await fetch(`/api/bubbles/${bubbleId}/members`)
+      if (response.ok) {
+        const data = await response.json()
+        console.log('Bubble data received:', data.bubble)
+        console.log('User role:', data.bubble?.user_role)
+        
+        // If preserving positions, keep existing positions for current members
+        if (preservePositions && bubblePositions.size > 0) {
+          // Only update member data, keep existing positions
+          setBubbleMembers(data.members)
+        } else {
+          // Generate new positions for new bubble or first load
+          generateBubblePositions(data.members)
+          setBubbleMembers(data.members)
+        }
+        setSelectedBubble(data.bubble)
+      }
+    } catch (error) {
+      console.error('Failed to fetch bubble members:', error)
+    }
+  }
+
+  const generateBubblePositions = (members) => {
+    const newPositions = new Map()
+    const containerPadding = 60
+    
+    members.forEach((member, index) => {
+      const randomX = Math.random() * (100 - containerPadding) + containerPadding/2
+      const randomY = Math.random() * (100 - containerPadding) + containerPadding/2
+      
+      newPositions.set(member.id, {
+        x: randomX,
+        y: randomY,
+        animationName: member.id === user?.id ? 'currentUserFloat' : `bubbleFloat${(index % 5) + 1}`,
+        animationDuration: 8 + (index % 4) * 2,
+        animationDelay: index * 0.5
+      })
+    })
+    
+    setBubblePositions(newPositions)
+  }
+
+  const toggleFloating = () => {
+    if (isFloatingEnabled) {
+      // Disable floating - move to grid positions
+      setIsFloatingEnabled(false)
     } else {
-      // Debounce the fetch to prevent rapid calls
-      const timeout = setTimeout(doFetch, 200)
-      setFetchUsersTimeout(timeout)
+      // Enable floating - restore original positions
+      setIsFloatingEnabled(true)
+    }
+  }
+
+  const handleKickMember = async (bubbleId, userId, displayName) => {
+    if (!confirm(`Are you sure you want to kick ${displayName} from this bubble?`)) return
+    
+    try {
+      const response = await fetch(`/api/bubbles/${bubbleId}/kick`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId })
+      })
+      
+      if (response.ok) {
+        alert(`${displayName} has been kicked from the bubble`)
+        fetchBubbleMembers(bubbleId, true) // Refresh members, preserve positions
+      } else {
+        const error = await response.json()
+        alert('Failed to kick member: ' + error.error)
+      }
+    } catch (error) {
+      console.error('Kick member error:', error)
+      alert('Failed to kick member')
+    }
+  }
+
+  const handlePromoteMember = async (bubbleId, userId, displayName, action) => {
+    const actionText = action === 'promote' ? 'promote to admin' : 'demote to member'
+    if (!confirm(`Are you sure you want to ${actionText} ${displayName}?`)) return
+    
+    try {
+      const response = await fetch(`/api/bubbles/${bubbleId}/promote`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId, action })
+      })
+      
+      if (response.ok) {
+        const result = await response.json()
+        alert(result.message)
+        fetchBubbleMembers(bubbleId, true) // Refresh members, preserve positions
+      } else {
+        const error = await response.json()
+        alert('Failed to change member role: ' + error.error)
+      }
+    } catch (error) {
+      console.error('Promote member error:', error)
+      alert('Failed to change member role')
+    }
+  }
+
+  const copyInviteCode = async (inviteCode) => {
+    try {
+      // Try modern clipboard API first
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(inviteCode)
+        alert(`✅ Invite code ${inviteCode} copied to clipboard! 📋`)
+      } else {
+        // Fallback for older browsers or non-HTTPS
+        const textArea = document.createElement('textarea')
+        textArea.value = inviteCode
+        textArea.style.position = 'fixed'
+        textArea.style.left = '-999999px'
+        textArea.style.top = '-999999px'
+        document.body.appendChild(textArea)
+        textArea.focus()
+        textArea.select()
+        
+        const successful = document.execCommand('copy')
+        document.body.removeChild(textArea)
+        
+        if (successful) {
+          alert(`✅ Invite code ${inviteCode} copied to clipboard! 📋`)
+        } else {
+          throw new Error('Copy command failed')
+        }
+      }
+    } catch (error) {
+      console.error('Failed to copy invite code:', error)
+      // Show the code in a prompt as final fallback
+      prompt('Copy this invite code manually:', inviteCode)
+    }
+  }
+
+  const handleLogin = async (e) => {
+    e.preventDefault()
+    const formData = new FormData(e.target)
+    
+    try {
+      const response = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: formData.get('username'),
+          password: formData.get('password')
+        })
+      })
+      
+      if (response.ok) {
+        const userData = await response.json()
+        setUser(userData)
+      } else {
+        const error = await response.text()
+        alert('Login failed: ' + error)
+      }
+    } catch (error) {
+      console.error('Login error:', error)
+      alert('Login failed')
     }
   }
 
@@ -145,50 +275,128 @@ function App() {
     }
   }
 
-  const handleLogin = async (e) => {
+  const handleCreateBubble = async (e) => {
     e.preventDefault()
     const formData = new FormData(e.target)
     
     try {
-      const response = await fetch('/api/auth/login', {
+      const response = await fetch('/api/bubbles', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          username: formData.get('username'),
-          password: formData.get('password')
+          name: formData.get('name'),
+          description: formData.get('description'),
+          isPublic: formData.get('isPublic') === 'on',
+          maxMembers: parseInt(formData.get('maxMembers')) || 50
         })
       })
       
       if (response.ok) {
-        const userData = await response.json()
-        setUser(userData)
+        const newBubble = await response.json()
+        setUserBubbles([newBubble, ...userBubbles])
+        setShowCreateModal(false)
+        alert(`🫧 Bubble "${newBubble.name}" created! Invite code: ${newBubble.invite_code}`)
       } else {
-        const error = await response.text()
-        alert('Login failed: ' + error)
+        const error = await response.json()
+        alert('Failed to create bubble: ' + error.error)
       }
     } catch (error) {
-      console.error('Login error:', error)
-      alert('Login failed')
+      console.error('Create bubble error:', error)
+      alert('Failed to create bubble')
     }
   }
 
-  const linkGitHub = async () => {
-    window.location.assign("/api/link/github")
-  }
-
-  const linkSpotify = async () => {
-    window.location.assign("/api/link/spotify")
-  }
-
-  const refreshUserData = async () => {
+  const handleJoinBubble = async (bubbleId = null) => {
     try {
-      const response = await fetch('/api/user')
+      const url = bubbleId ? `/api/bubbles/${bubbleId}/join` : `/api/bubbles/0/join`
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(bubbleId ? {} : { inviteCode })
+      })
+      
       if (response.ok) {
-        const userData = await response.json()
-        setUser(userData)
+        const result = await response.json()
+        alert(`🎉 ${result.message}`)
+        fetchUserBubbles()
+        setShowJoinModal(false)
+        setInviteCode('')
+        if (currentView === 'discover') {
+          fetchPublicBubbles()
+        }
+      } else {
+        const error = await response.json()
+        alert('Failed to join bubble: ' + error.error)
       }
     } catch (error) {
-      console.error('Failed to refresh user data:', error)
+      console.error('Join bubble error:', error)
+      alert('Failed to join bubble')
+    }
+  }
+
+  const handleLeaveBubble = async (bubbleId) => {
+    if (!confirm('Are you sure you want to leave this bubble?')) return
+    
+    try {
+      const response = await fetch(`/api/bubbles/${bubbleId}/leave`, {
+        method: 'POST'
+      })
+      
+      if (response.ok) {
+        alert('Left bubble successfully')
+        fetchUserBubbles()
+        if (currentView === 'bubble' && selectedBubble?.id === bubbleId) {
+          setCurrentView('dashboard')
+        }
+      } else {
+        const error = await response.json()
+        alert('Failed to leave bubble: ' + error.error)
+      }
+    } catch (error) {
+      console.error('Leave bubble error:', error)
+      alert('Failed to leave bubble')
+    }
+  }
+
+  const handleDeleteBubble = async (bubbleId) => {
+    if (!confirm('Are you sure you want to delete this bubble? This cannot be undone!')) return
+    
+    try {
+      const response = await fetch(`/api/bubbles/${bubbleId}/delete`, {
+        method: 'DELETE'
+      })
+      
+      if (response.ok) {
+        alert('Bubble deleted successfully')
+        fetchUserBubbles()
+        if (currentView === 'bubble' && selectedBubble?.id === bubbleId) {
+          setCurrentView('dashboard')
+        }
+      } else {
+        const error = await response.json()
+        alert('Failed to delete bubble: ' + error.error)
+      }
+    } catch (error) {
+      console.error('Delete bubble error:', error)
+      alert('Failed to delete bubble')
+    }
+  }
+
+  const handleFollowInBubble = async (action) => {
+    // This will follow/be followed by all members in the current bubble
+    try {
+      const endpoint = action === 'follow' ? '/api/github/follow-everyone' : '/api/github/get-followers'
+      const response = await fetch(endpoint, { method: 'POST' })
+      
+      if (response.ok) {
+        const result = await response.json()
+        alert(`🎉 ${result.message}`)
+      } else {
+        alert('Action failed')
+      }
+    } catch (error) {
+      console.error('Follow action error:', error)
+      alert('Action failed')
     }
   }
 
@@ -196,62 +404,41 @@ function App() {
     try {
       await fetch('/api/auth/logout', { method: 'POST' })
       setUser(null)
-      setAllUsers([])
+      setUserBubbles([])
+      setCurrentView('dashboard')
     } catch (error) {
       console.error('Logout error:', error)
     }
   }
 
-  const makeEveryoneFollowMe = async () => {
+  const deleteAccount = async () => {
+    if (!confirm('Are you sure you want to delete your account? This will remove your data and leave all bubbles. This cannot be undone.')) return
     try {
-      const githubResponse = await fetch('/api/github/get-followers', { method: 'POST' })
-      if (githubResponse.ok) {
-        alert('🎉 Everyone is now following you on GitHub!')
+      const res = await fetch('/api/user/delete', { method: 'DELETE' })
+      if (res.ok) {
+        alert('Your account has been deleted. Goodbye!')
+        setUser(null)
+        setUserBubbles([])
+        setPublicBubbles([])
+        setSelectedBubble(null)
+        setBubbleMembers([])
+        setCurrentView('dashboard')
       } else {
-        alert('Failed to make everyone follow you')
+        const err = await res.json().catch(() => ({}))
+        alert('Failed to delete account' + (err.error ? `: ${err.error}` : ''))
       }
-    } catch (error) {
-      console.error('Follow action failed:', error)
-      alert('Follow action failed')
-    }
-
-    try {
-      const spotifyResponse = await fetch('/api/spotify/follow-everyone', { method: 'POST' })
-      if (spotifyResponse.ok) {
-        alert('🎉 Everyone is now following you on Spotify!')
-      } else {
-        alert('Failed to follow everyone')
-      }
-    } catch (error) {
-      console.error('Follow action failed:', error)
-      alert('Follow action failed')
+    } catch (e) {
+      console.error('Delete account error:', e)
+      alert('Failed to delete account')
     }
   }
 
-  const followEveryone = async () => {
-    try {
-      const githubResponse = await fetch('/api/github/follow-everyone', { method: 'POST' })
-      if (githubResponse.ok) {
-        alert('🎉 You are now following everyone on GitHub!')
-      } else {
-        alert('Failed to follow everyone')
-      }
-    } catch (error) {
-      console.error('Follow action failed:', error)
-      alert('Follow action failed')
-    }
+  const linkGitHub = () => {
+    window.location.assign("/api/link/github")
+  }
 
-    try {
-      const spotifyResponse = await fetch('/api/spotify/follow-everyone', { method: 'POST' })
-      if (spotifyResponse.ok) {
-        alert('🎉 You are now following everyone on Spotify!')
-      } else {
-        alert('Failed to follow everyone')
-      } 
-    } catch (error) {
-      console.error('Follow action failed:', error)
-      alert('Follow action failed')
-    }
+  const linkSpotify = () => {
+    window.location.assign("/api/link/spotify")
   }
 
   if (loading) {
@@ -259,7 +446,7 @@ function App() {
       <div className="bubbly-container">
         <div className="tropical-loading">
           <div className="bubble-loader"></div>
-          <p>🏝️ Loading Bubbly...</p>
+          <p>Loading your bubbly world...</p>
         </div>
       </div>
     )
@@ -310,136 +497,409 @@ function App() {
             </form>
           )}
         </div>
+
+        <div className="about-section">
+          <h2>What is Bubbly?</h2>
+          <p>Bubbly lets you create and join social “bubbles” to connect accounts and take group actions in one place.</p>
+          <h3>How it works</h3>
+          <ul>
+            <li>Create or join a bubble with an invite code</li>
+            <li>Link GitHub and Spotify to enable group actions</li>
+            <li>Follow everyone in your bubble or have everyone follow you</li>
+            <li>Bubble creators can manage members and roles</li>
+          </ul>
+        </div>
       </div>
     )
   }
 
+  // Main Dashboard
   return (
     <div className="bubbly-container">
-      <div className="tropical-header">
-        <h1>🫧 Bubbly</h1>
-        <div className="user-info">
-          <span>🌺 Welcome, {user.display_name || user.username}!</span>
-          <button onClick={logout} className="logout-btn">🏖️ Logout</button>
+      {/* Header */}
+      <div className="dashboard-header">
+        <div className="header-content">
+          <h1>🫧 Bubbly Dashboard</h1>
+          <div className="user-info">
+            <span>Welcome, {user.display_name || user.username}!</span>
+            <button onClick={logout} className="logout-btn">Logout</button>
+            <button onClick={deleteAccount} className="logout-btn" title="Permanently delete your account">Delete Account</button>
+          </div>
+        </div>
+        
+        {/* Navigation */}
+        <div className="dashboard-nav">
+          <button 
+            className={currentView === 'dashboard' ? 'active' : ''} 
+            onClick={() => setCurrentView('dashboard')}
+          >
+            🏠 My Bubbles
+          </button>
+          <button 
+            className={currentView === 'discover' ? 'active' : ''} 
+            onClick={() => {
+              setCurrentView('discover')
+              fetchPublicBubbles()
+            }}
+          >
+            🔍 Discover
+          </button>
+          <button onClick={() => setShowCreateModal(true)} className="create-btn">
+            ➕ Create Bubble
+          </button>
+          <button onClick={() => setShowJoinModal(true)} className="join-btn">
+            🎫 Join by Code
+          </button>
         </div>
       </div>
 
-      {/* Social Account Linking */}
-      <div className="link-social-container">
-        <p>🔗 Link your social accounts to join the bubble party!</p>
-        <div className="link-buttons">
-          {/* GitHub Button */}
-          {user.social_accounts?.find(acc => acc.platform === 'github') ? (
-            <button className="github-link-btn linked" disabled>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.30 3.297-1.30.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
-              </svg>
-              ✅ GitHub Linked
-            </button>
-          ) : (
-            <button onClick={linkGitHub} className="github-link-btn">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.30 3.297-1.30.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
-              </svg>
-              🐙 Link GitHub
-            </button>
-          )}
-
-          {/* Spotify Button */}
-          {user.social_accounts?.find(acc => acc.platform === 'spotify') ? (
-            <button className="spotify-link-btn linked" disabled>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M12 0C5.4 0 0 5.4 0 12s5.4 12 12 12 12-5.4 12-12S18.66 0 12 0zm5.521 17.34c-.24.359-.66.48-1.021.24-2.82-1.74-6.36-2.101-10.561-1.141-.418.122-.779-.179-.899-.539-.12-.421.18-.78.54-.9 4.56-1.021 8.52-.6 11.64 1.32.42.18.479.659.301 1.02zm1.44-3.3c-.301.42-.841.6-1.262.3-3.239-1.98-8.159-2.58-11.939-1.38-.479.12-1.02-.12-1.14-.6-.12-.48.12-1.021.6-1.141C9.6 9.9 15 10.561 18.72 12.84c.361.181.54.78.241 1.2zm.12-3.36C15.24 8.4 8.82 8.16 5.16 9.301c-.6.179-1.2-.181-1.38-.721-.18-.601.18-1.2.72-1.381 4.26-1.26 11.28-1.02 15.721 1.621.539.3.719 1.02.42 1.56-.299.421-1.02.599-1.559.3z"/>
-              </svg>
-              ✅ Spotify Linked
-            </button>
-          ) : (
-            <button onClick={linkSpotify} className="spotify-link-btn">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M12 0C5.4 0 0 5.4 0 12s5.4 12 12 12 12-5.4 12-12S18.66 0 12 0zm5.521 17.34c-.24.359-.66.48-1.021.24-2.82-1.74-6.36-2.101-10.561-1.141-.418.122-.779-.179-.899-.539-.12-.421.18-.78.54-.9 4.56-1.021 8.52-.6 11.64 1.32.42.18.479.659.301 1.02zm1.44-3.3c-.301.42-.841.6-1.262.3-3.239-1.98-8.159-2.58-11.939-1.38-.479.12-1.02-.12-1.14-.6-.12-.48.12-1.021.6-1.141C9.6 9.9 15 10.561 18.72 12.84c.361.181.54.78.241 1.2zm.12-3.36C15.24 8.4 8.82 8.16 5.16 9.301c-.6.179-1.2-.181-1.38-.721-.18-.601.18-1.2.72-1.381 4.26-1.26 11.28-1.02 15.721 1.621.539.3.719 1.02.42 1.56-.299.421-1.02.599-1.559.3z"/>
-              </svg>
-              🎵 Link Spotify
-            </button>
-          )}
-        </div>
-      </div>
-
-      {/* User Bubbles - Always Visible */}
-      <div className="bubble-ocean">
-        <h2>🌊 Bubble Ocean - All Bubbly Users</h2>
-        <div className="bubbles-container">
-          {console.log('Rendering bubbles - isLoadingUsers:', isLoadingUsers, 'allUsers.length:', allUsers.length, 'allUsers:', allUsers)}
-          
-          {/* Always show users if we have them */}
-          {allUsers.map((bubbleUser, index) => {
-            console.log('Rendering bubble for user:', bubbleUser.display_name, bubbleUser)
-            return (
-              <div 
-                key={bubbleUser.id || index} 
-                className={`user-bubble ${bubbleUser.id === user.id ? 'current-user' : ''}`}
-                style={{
-                  animationDelay: `${index * 0.2}s`
-                }}
-              >
-                {bubbleUser.social_accounts && bubbleUser.social_accounts.length > 0 ? (
-                  <img 
-                    src={bubbleUser.social_accounts[0].avatar_url} 
-                    alt={bubbleUser.display_name || bubbleUser.username}
-                    className="bubble-avatar"
-                    onError={(e) => {
-                      console.log('Image failed to load, showing placeholder')
-                      e.target.style.display = 'none';
-                      e.target.nextSibling.style.display = 'flex';
+      {/* Main Content */}
+      <div className="dashboard-content">
+        {currentView === 'dashboard' && (
+          <div className="bubbles-grid">
+            <h2>🌊 Your Bubble Communities</h2>
+            {userBubbles.length === 0 ? (
+              <div className="empty-state">
+                <div className="empty-icon">🫧</div>
+                <p>You haven't joined any bubbles yet!</p>
+                <button onClick={() => setShowCreateModal(true)} className="tropical-btn">
+                  Create Your First Bubble
+                </button>
+              </div>
+            ) : (
+              <div className="bubbles-container">
+                {userBubbles.map(bubble => (
+                  <div 
+                    key={bubble.id} 
+                    className="bubble-card"
+                    style={{
+                      width: `${Math.min(450, Math.max(450, 300 + (bubble.member_count || 0) * 30))}px`
                     }}
-                  />
-                ) : null}
-                <div 
-                  className="bubble-avatar-placeholder" 
-                  style={{
-                    display: bubbleUser.social_accounts && bubbleUser.social_accounts.length > 0 ? 'none' : 'flex'
-                  }}
-                >
-                  {(bubbleUser.display_name || bubbleUser.username).charAt(0).toUpperCase()}
-                </div>
-                <div className="bubble-name">
-                  {bubbleUser.display_name || bubbleUser.username}
-                </div>
-                {bubbleUser.id === user.id && (
-                  <div className="current-user-indicator">👑</div>
+                  >
+                    <div className="bubble-header">
+                      <h3>{bubble.name}</h3>
+                      <div className="bubble-role">{bubble.role}</div>
+                    </div>
+                    <p className="bubble-description">{bubble.description || 'No description'}</p>
+                                         <div className="bubble-stats">
+                       <span>👥 {bubble.member_count} members</span>
+                       <span>{bubble.is_public ? '🌍 Public' : '🔒 Private'}</span>
+                     </div>
+                     <div className="bubble-invite">
+                       <span className="invite-label">Invite Code:</span>
+                       <button 
+                         className="invite-code-btn"
+                         onClick={() => copyInviteCode(bubble.invite_code)}
+                         title="Click to copy invite code"
+                       >
+                         {bubble.invite_code} 📋
+                       </button>
+                     </div>
+                    <div className="bubble-actions">
+                      <button 
+                        onClick={() => {
+                          setCurrentView('bubble')
+                          fetchBubbleMembers(bubble.id)
+                        }}
+                        className="view-btn"
+                      >
+                        👁️ View
+                      </button>
+                      {bubble.role === 'creator' ? (
+                        <button 
+                          onClick={() => handleDeleteBubble(bubble.id)}
+                          className="delete-btn"
+                        >
+                          🗑️ Delete
+                        </button>
+                      ) : (
+                        <button 
+                          onClick={() => handleLeaveBubble(bubble.id)}
+                          className="leave-btn"
+                        >
+                          👋 Leave
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {currentView === 'discover' && (
+          <div className="discover-section">
+            <h2>🔍 Discover Public Bubbles</h2>
+            {publicBubbles.length === 0 ? (
+              <div className="empty-state">
+                <div className="empty-icon">🔍</div>
+                <p>No public bubbles available to join right now.</p>
+              </div>
+            ) : (
+              <div className="bubbles-container">
+                {publicBubbles.map(bubble => (
+                  <div 
+                    key={bubble.id} 
+                    className="bubble-card"
+                                         style={{
+                       width: `${Math.min(450, Math.max(450, 300 + (bubble.member_count || 0) * 30))}px`
+                     }}
+                  >
+                    <div className="bubble-header">
+                      <h3>{bubble.name}</h3>
+                      <div className="bubble-creator">by {bubble.creator_name}</div>
+                    </div>
+                    <p className="bubble-description">{bubble.description || 'No description'}</p>
+                    <div className="bubble-stats">
+                      <span>👥 {bubble.member_count}/{bubble.max_members}</span>
+                      <span>🌍 Public</span>
+                    </div>
+                    <div className="bubble-actions">
+                      <button 
+                        onClick={() => handleJoinBubble(bubble.id)}
+                        className="join-btn"
+                        disabled={bubble.member_count >= bubble.max_members}
+                      >
+                        {bubble.member_count >= bubble.max_members ? '🚫 Full' : '🎯 Join'}
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {currentView === 'bubble' && selectedBubble && (
+          <div className="bubble-view">
+                         <div className="bubble-view-header">
+               <button onClick={() => setCurrentView('dashboard')} className="back-btn">
+                 ← Back to Dashboard
+               </button>
+               <h2>🫧 {selectedBubble.name}</h2>
+               <p>{selectedBubble.description}</p>
+               <div className="bubble-invite-section">
+                 <span className="invite-label">Invite Code:</span>
+                 <button 
+                   className="invite-code-btn large"
+                   onClick={() => copyInviteCode(selectedBubble.invite_code)}
+                   title="Click to copy invite code"
+                 >
+                   {selectedBubble.invite_code} 📋
+                 </button>
+               </div>
+             </div>
+
+            {/* Social Account Linking for Bubble Actions */}
+            <div className="bubble-social-section">
+              <h3>🔗 Link Social Accounts for Bubble Actions</h3>
+              <div className="social-links">
+                {user.social_accounts?.find(acc => acc.platform === 'github') ? (
+                  <span className="linked-account">✅ GitHub Linked</span>
+                ) : (
+                  <button onClick={linkGitHub} className="github-link-btn">
+                    🐙 Link GitHub
+                  </button>
+                )}
+                
+                {user.social_accounts?.find(acc => acc.platform === 'spotify') ? (
+                  <span className="linked-account">✅ Spotify Linked</span>
+                ) : (
+                  <button onClick={linkSpotify} className="spotify-link-btn">
+                    🎵 Link Spotify
+                  </button>
                 )}
               </div>
-            )
-          })}
-          
-          {/* Show loading only when no users and loading */}
-          {allUsers.length === 0 && isLoadingUsers && (
-            <div className="bubble-loading">
-              <div className="bubble-loader"></div>
-              <p>Loading bubbly friends...</p>
             </div>
-          )}
-          
-          {/* Show empty state only when no users and not loading */}
-          {allUsers.length === 0 && !isLoadingUsers && (
-            <div className="bubble-loading">
-              <div className="bubble-avatar-placeholder">🏝️</div>
-              <p>You're the first bubble! Invite friends to join! 🫧</p>
+
+            {/* Bubble Actions */}
+            <div className="bubble-actions-section">
+              <h3>🎯 Bubble Social Actions</h3>
+              <div className="action-buttons">
+                <button onClick={() => handleFollowInBubble('be-followed')} className="follow-me-btn">
+                  🌟 Everyone in Bubble Follow Me
+                </button>
+                <button onClick={() => handleFollowInBubble('follow')} className="follow-all-btn">
+                  🤝 I'll Follow Everyone in Bubble
+                </button>
+              </div>
             </div>
-          )}
-        </div>
+
+                         {/* Members */}
+             <div className="bubble-members">
+               <div className="members-header">
+                 <h3>👥 Members ({bubbleMembers.length})</h3>
+                 <button 
+                   onClick={toggleFloating}
+                   className={`floating-toggle-btn ${isFloatingEnabled ? 'enabled' : 'disabled'}`}
+                   title={isFloatingEnabled ? 'Disable floating (line up bubbles)' : 'Enable floating'}
+                 >
+                   {isFloatingEnabled ? '🌊 Floating' : '📋 Lined Up'}
+                 </button>
+               </div>
+               <div className={`floating-bubbles ${isFloatingEnabled ? 'floating' : 'lined-up'}`}>
+                 {bubbleMembers.map((member, index) => {
+                   const position = bubblePositions.get(member.id)
+                   
+                   // Calculate grid position for lined-up mode
+                   const gridCols = Math.ceil(Math.sqrt(bubbleMembers.length))
+                   const gridX = (index % gridCols) * (100 / gridCols) + (50 / gridCols)
+                   const gridY = Math.floor(index / gridCols) * 25 + 15
+                   
+                   const bubbleStyle = isFloatingEnabled ? {
+                     left: `${position?.x || 50}%`,
+                     top: `${position?.y || 50}%`,
+                     animation: position ? `${position.animationName} ${position.animationDuration}s cubic-bezier(0.4, 0, 0.6, 1) infinite` : 'none',
+                     animationDelay: position ? `${position.animationDelay}s` : '0s',
+                     transition: 'none'
+                   } : {
+                     left: `${gridX}%`,
+                     top: `${gridY}%`,
+                     animation: 'none',
+                     transition: 'all 0.8s cubic-bezier(0.4, 0, 0.6, 1)'
+                   }
+                   
+                   return (
+                     <div 
+                       key={member.id} 
+                       className={`floating-bubble ${member.id === user.id ? 'current-user' : ''} ${isFloatingEnabled ? '' : 'lined-up'}`}
+                       style={bubbleStyle}
+                     >
+                     <div className="bubble-avatar">
+                       {member.social_accounts && member.social_accounts.length > 0 ? (
+                         <img 
+                           src={member.social_accounts[0].avatar_url} 
+                           alt={member.display_name}
+                           onError={(e) => {
+                             e.target.style.display = 'none';
+                             e.target.nextSibling.style.display = 'flex';
+                           }}
+                         />
+                       ) : null}
+                       <div 
+                         className="bubble-avatar-placeholder" 
+                         style={{
+                           display: member.social_accounts && member.social_accounts.length > 0 ? 'none' : 'flex'
+                         }}
+                       >
+                         {member.display_name.charAt(0).toUpperCase()}
+                       </div>
+                     </div>
+                     
+                     <div className="bubble-info">
+                       <div className="bubble-name">{member.display_name}</div>
+                       <div className="bubble-role">{member.role}</div>
+                       {member.social_accounts && member.social_accounts.length > 0 && (
+                         <div className="bubble-social">
+                           {member.social_accounts.map((acc, idx) => (
+                             <span key={idx} className={`social-badge ${acc.platform}`}>
+                               {acc.platform === 'github' ? '🐙' : '🎵'}
+                             </span>
+                           ))}
+                         </div>
+                       )}
+                     </div>
+
+                     {/* Management Actions for Creator/Admin - Don't show for current user */}
+                     {member.id !== user.id && (selectedBubble?.user_role === 'creator' || selectedBubble?.user_role === 'admin') && (
+                       <div className="bubble-actions">
+                         {/* Kick action - Creators can kick anyone, Admins can only kick members */}
+                         {(selectedBubble.user_role === 'creator' || 
+                           (selectedBubble.user_role === 'admin' && member.role === 'member')) && (
+                           <button 
+                             className="kick-btn"
+                             onClick={() => handleKickMember(selectedBubble.id, member.id, member.display_name)}
+                             title="Kick member"
+                           >
+                             👢
+                           </button>
+                         )}
+                         
+                         {/* Promote/Demote actions (creator only) */}
+                         {selectedBubble.user_role === 'creator' && member.role !== 'creator' && (
+                           <button 
+                             className="promote-btn"
+                             onClick={() => handlePromoteMember(
+                               selectedBubble.id, 
+                               member.id, 
+                               member.display_name, 
+                               member.role === 'admin' ? 'demote' : 'promote'
+                             )}
+                             title={member.role === 'admin' ? 'Demote to member' : 'Promote to admin'}
+                           >
+                             {member.role === 'admin' ? '👇' : '👆'}
+                           </button>
+                         )}
+                       </div>
+                     )}
+
+                     {/* Current user indicator */}
+                     {member.id === user.id && (
+                       <div className="current-user-indicator">👑</div>
+                     )}
+                   </div>
+                   );
+                 })}
+               </div>
+             </div>
+          </div>
+        )}
       </div>
 
-      {/* Action Buttons */}
-      <div className="action-buttons">
-        <button onClick={makeEveryoneFollowMe} className="action-btn follow-me-btn">
-          🌟 Everyone Follow Me
-        </button>
-        <button onClick={followEveryone} className="action-btn follow-all-btn">
-          🤝 I'll Follow Everyone
-        </button>
-      </div>
+      {/* Create Bubble Modal */}
+      {showCreateModal && (
+        <div className="modal-overlay" onClick={() => setShowCreateModal(false)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <h3>🫧 Create New Bubble</h3>
+            <form onSubmit={handleCreateBubble}>
+              <input type="text" name="name" placeholder="Bubble Name" required />
+              <textarea name="description" placeholder="Description (optional)" rows="3"></textarea>
+              <div className="form-row">
+                <label>
+                  <input type="checkbox" name="isPublic" defaultChecked />
+                  Make this bubble public
+                </label>
+              </div>
+              <div className="form-row">
+                <label>
+                  Max Members:
+                  <input type="number" name="maxMembers" defaultValue="50" min="2" max="100" />
+                </label>
+              </div>
+              <div className="modal-actions">
+                <button type="button" onClick={() => setShowCreateModal(false)}>Cancel</button>
+                <button type="submit" className="tropical-btn">Create Bubble</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Join by Code Modal */}
+      {showJoinModal && (
+        <div className="modal-overlay" onClick={() => setShowJoinModal(false)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <h3>🎫 Join Bubble by Invite Code</h3>
+            <form onSubmit={(e) => { e.preventDefault(); handleJoinBubble(); }}>
+              <input 
+                type="text" 
+                placeholder="Enter invite code" 
+                value={inviteCode}
+                onChange={(e) => setInviteCode(e.target.value.toUpperCase())}
+                required 
+              />
+              <div className="modal-actions">
+                <button type="button" onClick={() => setShowJoinModal(false)}>Cancel</button>
+                <button type="submit" className="tropical-btn">Join Bubble</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
 
 export default App
+
