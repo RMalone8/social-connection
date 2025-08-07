@@ -1043,7 +1043,7 @@ body::before {
 }
 
 /* Buttons */
-.tropical-btn, .logout-btn, .github-link-btn, .spotify-link-btn {
+.tropical-btn, .logout-btn, .github-link-btn {
   background: var(--tropical-gradient);
   color: white;
   border: none;
@@ -1059,7 +1059,7 @@ body::before {
   gap: 8px;
 }
 
-.tropical-btn:hover, .logout-btn:hover, .github-link-btn:hover, .spotify-link-btn:hover {
+.tropical-btn:hover, .logout-btn:hover, .github-link-btn:hover {
   transform: translateY(-3px);
   box-shadow: 0 6px 24px rgba(0, 180, 216, 0.4);
 }
@@ -1074,24 +1074,14 @@ body::before {
   background: linear-gradient(135deg, #b00020 0%, #e53935 100%);
 }
 
-.spotify-link-btn {
-  background: linear-gradient(135deg, #1DB954 0%, #1ed760 100%);
-}
-
-.spotify-link-btn:hover {
-  box-shadow: 0 6px 24px rgba(29, 185, 84, 0.4);
-}
-
 /* Linked Button State */
-.github-link-btn.linked,
-.spotify-link-btn.linked {
+.github-link-btn.linked {
   background: linear-gradient(135deg, #4ECDC4 0%, #00B4D8 100%);
   opacity: 0.8;
   cursor: default;
 }
 
-.github-link-btn.linked:hover,
-.spotify-link-btn.linked:hover {
+.github-link-btn.linked:hover {
   transform: none;
   box-shadow: 0 4px 16px rgba(78, 205, 196, 0.3);
 }

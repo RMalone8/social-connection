@@ -139,26 +139,85 @@ async function handleApiRoutes(request, env, url) {
     return logDatabaseContents(env);
   }
 
+  if (url.pathname === "/api/link/github/unlink" && request.method === 'POST') {
+    return handleGitHubUnlink(request, env);
+  }
+
   return new Response(null, { status: 404 });
 }
 
-// Password hashing utilities
-async function hashPassword(password) {
+// Password hashing utilities (PBKDF2 with per-user salt)
+const PASSWORD_SCHEME_PREFIX = 'pbkdf2';
+const PBKDF2_ITERATIONS = 60000; // Tuned for Workers CPU budget; increase if stable
+const PBKDF2_KEYLEN_BYTES = 32;   // 256-bit
+
+function toBase64(bytes) {
+  let binary = '';
+  const arr = new Uint8Array(bytes);
+  for (let i = 0; i < arr.byteLength; i++) binary += String.fromCharCode(arr[i]);
+  return btoa(binary);
+}
+
+function fromBase64(b64) {
+  const binary = atob(b64);
+  const len = binary.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
+}
+
+async function hashPasswordPBKDF2(password) {
+  const enc = new TextEncoder();
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const keyMaterial = await crypto.subtle.importKey('raw', enc.encode(password), { name: 'PBKDF2' }, false, ['deriveBits']);
+  const derivedBits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', hash: 'SHA-256', salt, iterations: PBKDF2_ITERATIONS },
+    keyMaterial,
+    PBKDF2_KEYLEN_BYTES * 8
+  );
+  const saltB64 = toBase64(salt);
+  const hashB64 = toBase64(derivedBits);
+  // Format: pbkdf2$iterations$salt$hash
+  return `${PASSWORD_SCHEME_PREFIX}$${PBKDF2_ITERATIONS}$${saltB64}$${hashB64}`;
+}
+
+async function verifyPasswordFlexible(password, stored) {
+  // New PBKDF2 format
+  if (stored && stored.startsWith(`${PASSWORD_SCHEME_PREFIX}$`)) {
+    const parts = stored.split('$');
+    if (parts.length !== 4) return false;
+    const iterations = parseInt(parts[1], 10);
+    const salt = new Uint8Array(fromBase64(parts[2]));
+    const expectedB64 = parts[3];
+
+    const enc = new TextEncoder();
+    const keyMaterial = await crypto.subtle.importKey('raw', enc.encode(password), { name: 'PBKDF2' }, false, ['deriveBits']);
+    const derivedBits = await crypto.subtle.deriveBits(
+      { name: 'PBKDF2', hash: 'SHA-256', salt, iterations },
+      keyMaterial,
+      PBKDF2_KEYLEN_BYTES * 8
+    );
+    const actualB64 = toBase64(derivedBits);
+    return actualB64 === expectedB64;
+  }
+
+  // Legacy SHA-256 hex fallback
   const encoder = new TextEncoder();
   const data = encoder.encode(password);
   const hashBuffer = await crypto.subtle.digest('SHA-256', data);
   const hashArray = Array.from(new Uint8Array(hashBuffer));
-  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-}
+  const hex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+  const normalizedStored = (stored || '').trim().toLowerCase();
+  if (hex === normalizedStored) return true;
 
-async function verifyPassword(password, hash) {
-  const hashedPassword = await hashPassword(password);
-  return hashedPassword === hash;
+  // Worst-case legacy: stored as plaintext; allow once for migration
+  if ((stored || '').trim() === password) return true;
+  return false;
 }
 
 // Database helper functions
 async function createNativeAccount(env, username, email, password, display_name) {
-  const passwordHash = await hashPassword(password);
+  const passwordHash = await hashPasswordPBKDF2(password);
   
   const result = await env.DB.prepare(`
     INSERT INTO native_accounts (username, email, password_hash, display_name)
@@ -446,7 +505,7 @@ async function handleRegister(request, env) {
 
   } catch (error) {
     console.error('Registration error:', error);
-    return new Response(JSON.stringify({ error: 'Registration failed' }), {
+    return new Response(JSON.stringify({ error: 'Registration failed', details: String(error?.message || error) }), {
       status: 500,
       headers: { 'Content-Type': 'application/json' }
     });
@@ -478,13 +537,25 @@ async function handleLogin(request, env) {
       });
     }
 
-    // Verify password
-    const isValidPassword = await verifyPassword(password, account.password_hash);
+    // Verify password (supports legacy SHA-256 and PBKDF2)
+    const isValidPassword = await verifyPasswordFlexible(password, account.password_hash);
     if (!isValidPassword) {
       return new Response(JSON.stringify({ error: 'Invalid username or password' }), {
         status: 401,
         headers: { 'Content-Type': 'application/json' }
       });
+    }
+
+    // Upgrade legacy hashes to PBKDF2 on successful login
+    if (!account.password_hash?.startsWith(`${PASSWORD_SCHEME_PREFIX}$`)) {
+      try {
+        const newHash = await hashPasswordPBKDF2(password);
+        await env.DB.prepare('UPDATE native_accounts SET password_hash = ? WHERE id = ?')
+          .bind(newHash, account.id)
+          .run();
+      } catch (e) {
+        console.warn('Password rehash (upgrade) failed:', e);
+      }
     }
 
     // Create session
@@ -1230,22 +1301,27 @@ async function getGithubFollowers(request, env) {
       return new Response('Not authenticated', { status: 401 });
     }
 
+    // Expect bubbleId to scope the operation
+    const { bubbleId } = await request.json().catch(() => ({ }));
+    if (!bubbleId) {
+      return Response.json({ error: 'bubbleId is required' }, { status: 400 });
+    }
+
     // Get current user's social accounts to know who they are on each platform
     const currentUserAccounts = sessionUser.social_accounts || [];
     const currentGitHub = currentUserAccounts.find(acc => acc.platform === 'github');
-    const currentSpotify = currentUserAccounts.find(acc => acc.platform === 'spotify');
-
-    if (!currentGitHub && !currentSpotify) {
-      return new Response('No social accounts linked', { status: 400 });
+    if (!currentGitHub) {
+      return new Response('No GitHub account linked', { status: 400 });
     }
 
-    // Get ALL other users' social accounts (excluding current user)
+    // Get other bubble members' GitHub tokens (excluding current user)
     const otherAccounts = await env.DB.prepare(`
       SELECT sa.access_token, sa.platform, sa.platform_username, na.username as native_username
       FROM social_accounts sa
       JOIN native_accounts na ON sa.native_account_id = na.id
-      WHERE sa.access_token IS NOT NULL AND na.id != ?
-    `).bind(sessionUser.account_id).all();
+      JOIN bubble_memberships bm ON bm.user_id = na.id
+      WHERE sa.platform = 'github' AND sa.access_token IS NOT NULL AND na.id != ? AND bm.bubble_id = ?
+    `).bind(sessionUser.account_id, bubbleId).all();
 
     console.log(`Found ${otherAccounts.results.length} social accounts to make follow you`);
 
@@ -1253,45 +1329,24 @@ async function getGithubFollowers(request, env) {
 
     for (const account of otherAccounts.results) {
       try {
-        if (account.platform === 'github' && currentGitHub) {
-          console.log(`Making GitHub user ${account.platform_username} follow ${currentGitHub.platform_username}...`);
+        console.log(`Making GitHub user ${account.platform_username} follow ${currentGitHub.platform_username}...`);
 
-          const followResponse = await fetch(`https://api.github.com/user/following/${currentGitHub.platform_username}`, {
-            method: 'PUT',
-            headers: {
-              'Authorization': `token ${account.access_token}`,
-              'User-Agent': 'Bubbly-Social-App',
-              'Accept': 'application/vnd.github.v3+json'
-            }
-          });
+        const followResponse = await fetch(`https://api.github.com/user/following/${currentGitHub.platform_username}`, {
+          method: 'PUT',
+          headers: {
+            'Authorization': `token ${account.access_token}`,
+            'User-Agent': 'Bubbly-Social-App',
+            'Accept': 'application/vnd.github.v3+json'
+          }
+        });
 
-          followResults.push({
-            platform: 'github',
-            follower: account.platform_username,
-            target: currentGitHub.platform_username,
-            status: followResponse.status,
-            success: followResponse.status === 204
-          });
-
-        } else if (account.platform === 'spotify' && currentSpotify) {
-          console.log(`Making Spotify user ${account.platform_username} follow ${currentSpotify.platform_username}...`);
-
-          const followResponse = await fetch(`https://api.spotify.com/v1/me/following?type=user&ids=${currentSpotify.platform_username}`, {
-            method: 'PUT',
-            headers: {
-              'Authorization': `Bearer ${account.access_token}`,
-              'Content-Type': 'application/json'
-            }
-          });
-
-          followResults.push({
-            platform: 'spotify',
-            follower: account.platform_username,
-            target: currentSpotify.platform_username,
-            status: followResponse.status,
-            success: followResponse.status === 204
-          });
-        }
+        followResults.push({
+          platform: 'github',
+          follower: account.platform_username,
+          target: currentGitHub.platform_username,
+          status: followResponse.status,
+          success: followResponse.status === 204
+        });
 
       } catch (error) {
         console.error(`Error making ${account.platform_username} follow on ${account.platform}:`, error);
@@ -1308,14 +1363,10 @@ async function getGithubFollowers(request, env) {
 
     const successful = followResults.filter(r => r.success).length;
     return Response.json({ 
-      message: `Made ${successful}/${followResults.length} users follow you across all platforms`,
+      message: `Made ${successful}/${followResults.length} members follow you on GitHub`,
       results: followResults,
       total_attempts: followResults.length,
-      successful: successful,
-      platforms: {
-        github: followResults.filter(r => r.platform === 'github').length,
-        spotify: followResults.filter(r => r.platform === 'spotify').length
-      }
+      successful: successful
     });
 
   } catch (error) {
@@ -1340,19 +1391,24 @@ async function followEveryoneOnGithub(request, env) {
     // Get current user's social accounts
     const currentUserAccounts = sessionUser.social_accounts || [];
     const currentGitHub = currentUserAccounts.find(acc => acc.platform === 'github');
-    const currentSpotify = currentUserAccounts.find(acc => acc.platform === 'spotify');
-
-    if (!currentGitHub && !currentSpotify) {
-      return new Response('No social accounts linked', { status: 400 });
+    if (!currentGitHub) {
+      return new Response('No GitHub account linked', { status: 400 });
     }
 
-    // Get all other users' social accounts (excluding current user)
+    // Expect bubbleId to scope the operation
+    const { bubbleId } = await request.json().catch(() => ({ }));
+    if (!bubbleId) {
+      return Response.json({ error: 'bubbleId is required' }, { status: 400 });
+    }
+
+    // Get other members' GitHub usernames (excluding current user)
     const otherAccounts = await env.DB.prepare(`
       SELECT sa.platform, sa.platform_username
       FROM social_accounts sa
       JOIN native_accounts na ON sa.native_account_id = na.id
-      WHERE na.id != ? AND sa.platform_username IS NOT NULL
-    `).bind(sessionUser.account_id).all();
+      JOIN bubble_memberships bm ON bm.user_id = na.id
+      WHERE sa.platform = 'github' AND na.id != ? AND sa.platform_username IS NOT NULL AND bm.bubble_id = ?
+    `).bind(sessionUser.account_id, bubbleId).all();
 
     console.log(`Found ${otherAccounts.results.length} other social accounts to follow`);
 
@@ -1360,43 +1416,23 @@ async function followEveryoneOnGithub(request, env) {
 
     for (const account of otherAccounts.results) {
       try {
-        if (account.platform === 'github' && currentGitHub) {
-          console.log(`Following GitHub user ${account.platform_username}...`);
+        console.log(`Following GitHub user ${account.platform_username}...`);
 
-          const followResponse = await fetch(`https://api.github.com/user/following/${account.platform_username}`, {
-            method: 'PUT',
-            headers: {
-              'Authorization': `token ${currentGitHub.access_token}`,
-              'User-Agent': 'Bubbly-Social-App',
-              'Accept': 'application/vnd.github.v3+json'
-            }
-          });
+        const followResponse = await fetch(`https://api.github.com/user/following/${account.platform_username}`, {
+          method: 'PUT',
+          headers: {
+            'Authorization': `token ${currentGitHub.access_token}`,
+            'User-Agent': 'Bubbly-Social-App',
+            'Accept': 'application/vnd.github.v3+json'
+          }
+        });
 
-          followResults.push({
-            platform: 'github',
-            target: account.platform_username,
-            status: followResponse.status,
-            success: followResponse.status === 204
-          });
-
-        } else if (account.platform === 'spotify' && currentSpotify) {
-          console.log(`Following Spotify user ${account.platform_username}...`);
-
-          const followResponse = await fetch(`https://api.spotify.com/v1/me/following?type=user&ids=${account.platform_username}`, {
-            method: 'PUT',
-            headers: {
-              'Authorization': `Bearer ${currentSpotify.access_token}`,
-              'Content-Type': 'application/json'
-            }
-          });
-
-          followResults.push({
-            platform: 'spotify',
-            target: account.platform_username,
-            status: followResponse.status,
-            success: followResponse.status === 204
-          });
-        }
+        followResults.push({
+          platform: 'github',
+          target: account.platform_username,
+          status: followResponse.status,
+          success: followResponse.status === 204
+        });
 
       } catch (error) {
         console.error(`Error following ${account.platform_username} on ${account.platform}:`, error);
@@ -1411,14 +1447,10 @@ async function followEveryoneOnGithub(request, env) {
 
     const successful = followResults.filter(r => r.success).length;
     return Response.json({
-      message: `You are now following ${successful}/${followResults.length} users across all platforms`,
+      message: `You are now following ${successful}/${followResults.length} members on GitHub`,
       results: followResults,
       total_attempts: followResults.length,
-      successful: successful,
-      platforms: {
-        github: followResults.filter(r => r.platform === 'github').length,
-        spotify: followResults.filter(r => r.platform === 'spotify').length
-      }
+      successful: successful
     });
 
   } catch (error) {
@@ -2301,5 +2333,26 @@ async function handleDeleteAccount(request, env) {
       status: 500,
       headers: { 'Content-Type': 'application/json' }
     });
+  }
+}
+
+// Unlink GitHub from current user
+async function handleGitHubUnlink(request, env) {
+  try {
+    const cookies = parseCookies(request.headers.get('Cookie') || '');
+    const sessionUser = await getSessionUser(env, cookies.session);
+
+    if (!sessionUser) {
+      return new Response('Not authenticated', { status: 401 });
+    }
+
+    await env.DB.prepare(`
+      DELETE FROM social_accounts WHERE native_account_id = ? AND platform = 'github'
+    `).bind(sessionUser.account_id).run();
+
+    return Response.json({ success: true, message: 'GitHub account unlinked' });
+  } catch (error) {
+    console.error('Error unlinking GitHub:', error);
+    return Response.json({ error: 'Failed to unlink GitHub' }, { status: 500 });
   }
 }

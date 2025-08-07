@@ -386,7 +386,11 @@ function App() {
     // This will follow/be followed by all members in the current bubble
     try {
       const endpoint = action === 'follow' ? '/api/github/follow-everyone' : '/api/github/get-followers'
-      const response = await fetch(endpoint, { method: 'POST' })
+      const response = await fetch(endpoint, { 
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bubbleId: selectedBubble?.id })
+      })
       
       if (response.ok) {
         const result = await response.json()
@@ -437,8 +441,21 @@ function App() {
     window.location.assign("/api/link/github")
   }
 
-  const linkSpotify = () => {
-    window.location.assign("/api/link/spotify")
+  const unlinkGitHub = async () => {
+    if (!confirm('Unlink your GitHub account from Bubbly?')) return
+    try {
+      const res = await fetch('/api/link/github/unlink', { method: 'POST' })
+      if (res.ok) {
+        // Refresh user to reflect unlinked state
+        await checkAuthStatus()
+        alert('GitHub account unlinked')
+      } else {
+        alert('Failed to unlink GitHub')
+      }
+    } catch (e) {
+      console.error('Unlink GitHub error:', e)
+      alert('Failed to unlink GitHub')
+    }
   }
 
   if (loading) {
@@ -504,7 +521,7 @@ function App() {
           <h3>How it works</h3>
           <ul>
             <li>Create or join a bubble with an invite code</li>
-            <li>Link GitHub and Spotify to enable group actions</li>
+            <li>Link GitHub to enable group actions</li>
             <li>Follow everyone in your bubble or have everyone follow you</li>
             <li>Bubble creators can manage members and roles</li>
           </ul>
@@ -696,18 +713,10 @@ function App() {
               <h3>🔗 Link Social Accounts for Bubble Actions</h3>
               <div className="social-links">
                 {user.social_accounts?.find(acc => acc.platform === 'github') ? (
-                  <span className="linked-account">✅ GitHub Linked</span>
+                  <button className="github-link-btn linked" onClick={unlinkGitHub} title="Unlink GitHub">✅ GitHub Linked (click to unlink)</button>
                 ) : (
                   <button onClick={linkGitHub} className="github-link-btn">
                     🐙 Link GitHub
-                  </button>
-                )}
-                
-                {user.social_accounts?.find(acc => acc.platform === 'spotify') ? (
-                  <span className="linked-account">✅ Spotify Linked</span>
-                ) : (
-                  <button onClick={linkSpotify} className="spotify-link-btn">
-                    🎵 Link Spotify
                   </button>
                 )}
               </div>
@@ -792,11 +801,13 @@ function App() {
                        <div className="bubble-role">{member.role}</div>
                        {member.social_accounts && member.social_accounts.length > 0 && (
                          <div className="bubble-social">
-                           {member.social_accounts.map((acc, idx) => (
-                             <span key={idx} className={`social-badge ${acc.platform}`}>
-                               {acc.platform === 'github' ? '🐙' : '🎵'}
-                             </span>
-                           ))}
+                           {member.social_accounts
+                             .filter(acc => acc.platform === 'github')
+                             .map((acc, idx) => (
+                               <span key={idx} className={`social-badge ${acc.platform}`}>
+                                 🐙
+                               </span>
+                             ))}
                          </div>
                        )}
                      </div>
