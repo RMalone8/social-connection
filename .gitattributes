@@ -1,1 +1,1 @@
-test.txt filter=git-crypt diff=git-crypt
+.dev.vars filter=git-crypt diff=git-crypt
