@@ -124,6 +124,14 @@ async function handleApiRoutes(request, env, url) {
     return handleAdminGetStats(request, env);
   }
 
+  if (url.pathname.startsWith("/api/admin/users/") && url.pathname.endsWith("/delete") && request.method === "DELETE") {
+    return handleAdminDeleteUser(request, env);
+  }
+
+  if (url.pathname.startsWith("/api/admin/bubbles/") && url.pathname.includes("/kick/") && request.method === "POST") {
+    return handleAdminKickUserFromBubble(request, env);
+  }
+
   // Social media linking (requires native login first)
   if (url.pathname === "/api/link/github") {
     return handleGitHubLink(request, env);
@@ -2687,6 +2695,24 @@ async function handleAdminGetAllBubbles(request, env) {
       ORDER BY b.created_at DESC
     `).all();
 
+    // Get members for each bubble
+    for (const bubble of bubbles.results) {
+      const members = await env.DB.prepare(`
+        SELECT na.id, na.username, na.display_name, bm.role
+        FROM bubble_memberships bm
+        JOIN native_accounts na ON bm.user_id = na.id
+        WHERE bm.bubble_id = ?
+        ORDER BY 
+          CASE bm.role 
+            WHEN 'creator' THEN 1 
+            WHEN 'admin' THEN 2 
+            ELSE 3 
+          END,
+          na.username
+      `).bind(bubble.id).all();
+      bubble.members = members.results;
+    }
+
     return Response.json({
       bubbles: bubbles.results,
       total: bubbles.results.length
@@ -2790,5 +2816,138 @@ async function handleAdminGetStats(request, env) {
   } catch (error) {
     console.error('Admin get stats error:', error);
     return new Response('Server error', { status: 500 });
+  }
+}
+
+// Admin: Delete a user account
+async function handleAdminDeleteUser(request, env) {
+  try {
+    const { error, user } = await requireAdmin(request, env);
+    if (error) return error;
+
+    const url = new URL(request.url);
+    const pathParts = url.pathname.split('/'); // /api/admin/users/{userId}/delete
+    const userId = pathParts[4]; // Index 4 should be the userId
+
+    console.log(`Admin ${user.username} deleting user - URL: ${url.pathname}, Parts: ${JSON.stringify(pathParts)}, UserID: ${userId}`);
+
+    // Validate userId
+    if (!userId || isNaN(parseInt(userId))) {
+      console.log(`Invalid userId: ${userId}`);
+      return Response.json({ error: 'Invalid user ID' }, { status: 400 });
+    }
+
+    // Get user info before deletion for logging
+    const targetUser = await env.DB.prepare(`
+      SELECT username, email FROM native_accounts WHERE id = ?
+    `).bind(parseInt(userId)).first();
+
+    if (!targetUser) {
+      console.log(`User not found with ID: ${userId}`);
+      return Response.json({ error: 'User not found' }, { status: 404 });
+    }
+
+    const userIdInt = parseInt(userId);
+
+    // Delete bubble memberships (removes user from all bubbles)
+    await env.DB.prepare(`
+      DELETE FROM bubble_memberships WHERE user_id = ?
+    `).bind(userIdInt).run();
+
+    // Delete bubbles created by this user (CASCADE will handle memberships)
+    await env.DB.prepare(`
+      DELETE FROM bubbles WHERE creator_id = ?
+    `).bind(userIdInt).run();
+
+    // Delete social accounts linked to this user
+    await env.DB.prepare(`
+      DELETE FROM social_accounts WHERE native_account_id = ?
+    `).bind(userIdInt).run();
+
+    // Delete sessions for this user
+    await env.DB.prepare(`
+      DELETE FROM sessions WHERE native_account_id = ?
+    `).bind(userIdInt).run();
+
+    // Finally delete the native account
+    await env.DB.prepare(`
+      DELETE FROM native_accounts WHERE id = ?
+    `).bind(userIdInt).run();
+
+    console.log(`Admin ${user.username} successfully deleted user: ${targetUser.username} (${targetUser.email})`);
+
+    return Response.json({ 
+      success: true, 
+      message: `User ${targetUser.username} deleted successfully` 
+    });
+  } catch (error) {
+    console.error('Error deleting user account:', error);
+    return new Response(JSON.stringify({ error: 'Failed to delete user account' }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+}
+
+// Admin: Kick a user from a bubble
+async function handleAdminKickUserFromBubble(request, env) {
+  try {
+    const { error, user } = await requireAdmin(request, env);
+    if (error) return error;
+
+    const url = new URL(request.url);
+    const pathParts = url.pathname.split('/'); // /api/admin/bubbles/{bubbleId}/kick/{userId}
+    const bubbleId = pathParts[4]; // Index 4 should be bubbleId
+    const userId = pathParts[6];   // Index 6 should be userId
+
+    console.log(`Admin ${user.username} kicking user - URL: ${url.pathname}, Parts: ${JSON.stringify(pathParts)}, BubbleID: ${bubbleId}, UserID: ${userId}`);
+
+    // Validate IDs
+    if (!userId || !bubbleId || isNaN(parseInt(userId)) || isNaN(parseInt(bubbleId))) {
+      return Response.json({ error: 'Invalid bubble or user ID' }, { status: 400 });
+    }
+
+    const userIdInt = parseInt(userId);
+    const bubbleIdInt = parseInt(bubbleId);
+
+    // Get user and bubble info for logging
+    const targetUser = await env.DB.prepare(`
+      SELECT username FROM native_accounts WHERE id = ?
+    `).bind(userIdInt).first();
+
+    const bubble = await env.DB.prepare(`
+      SELECT name FROM bubbles WHERE id = ?
+    `).bind(bubbleIdInt).first();
+
+    if (!targetUser || !bubble) {
+      return Response.json({ error: 'User or bubble not found' }, { status: 404 });
+    }
+
+    // Check if user is actually in the bubble
+    const membership = await env.DB.prepare(`
+      SELECT id FROM bubble_memberships WHERE user_id = ? AND bubble_id = ?
+    `).bind(userIdInt, bubbleIdInt).first();
+
+    if (!membership) {
+      return Response.json({ error: 'User is not a member of this bubble' }, { status: 400 });
+    }
+
+    // Remove user from bubble
+    await env.DB.prepare(`
+      DELETE FROM bubble_memberships WHERE user_id = ? AND bubble_id = ?
+    `).bind(userIdInt, bubbleIdInt).run();
+
+    console.log(`Admin ${user.username} successfully kicked ${targetUser.username} from bubble "${bubble.name}"`);
+
+    return Response.json({ 
+      success: true, 
+      message: `${targetUser.username} kicked from "${bubble.name}"` 
+    });
+  } catch (error) {
+    console.error('Error kicking user from bubble:', error);
+    return new Response(JSON.stringify({ error: 'Failed to kick user from bubble' }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' }
+    });
   }
 }

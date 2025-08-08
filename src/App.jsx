@@ -694,6 +694,54 @@ function App() {
     }
   };
 
+  const adminDeleteUser = async (userId, username) => {
+    if (!confirm(`Are you sure you want to permanently delete user "${username}"? This will remove them from all bubbles and cannot be undone.`)) {
+      return;
+    }
+    
+    try {
+      const response = await fetch(`/api/admin/users/${userId}/delete`, {
+        method: 'DELETE'
+      });
+      
+      if (response.ok) {
+        const data = await response.json();
+        alert(data.message);
+        // Refresh the users list
+        fetchAdminUsers();
+      } else {
+        const error = await response.json();
+        alert(`Failed to delete user: ${error.error}`);
+      }
+    } catch (error) {
+      alert('Failed to delete user');
+    }
+  };
+
+  const adminKickUserFromBubble = async (bubbleId, userId, username, bubbleName) => {
+    if (!confirm(`Are you sure you want to kick "${username}" from bubble "${bubbleName}"?`)) {
+      return;
+    }
+    
+    try {
+      const response = await fetch(`/api/admin/bubbles/${bubbleId}/kick/${userId}`, {
+        method: 'POST'
+      });
+      
+      if (response.ok) {
+        const data = await response.json();
+        alert(data.message);
+        // Refresh the bubbles list
+        fetchAdminBubbles();
+      } else {
+        const error = await response.json();
+        alert(`Failed to kick user: ${error.error}`);
+      }
+    } catch (error) {
+      alert('Failed to kick user');
+    }
+  };
+
   if (loading) {
     return (
       <div className="bubbly-container">
@@ -958,32 +1006,47 @@ function App() {
             {adminBubbles.length > 0 && (
               <div className="admin-bubbles">
                 <h3>🌊 All Bubbles ({adminBubbles.length})</h3>
-                <div className="admin-table">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>Name</th>
-                        <th>Creator</th>
-                        <th>Type</th>
-                        <th>Members</th>
-                        <th>Invite Code</th>
-                        <th>Created</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {adminBubbles.map(bubble => (
-                        <tr key={bubble.id}>
-                          <td><strong>{bubble.name}</strong></td>
-                          <td>@{bubble.creator_username}</td>
-                          <td>{bubble.is_public ? '🌍 Public' : '🔒 Private'}</td>
-                          <td>{bubble.member_count}/{bubble.max_members}</td>
-                          <td><code>{bubble.invite_code}</code></td>
-                          <td>{new Date(bubble.created_at).toLocaleDateString()}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+                {adminBubbles.map(bubble => (
+                  <div key={bubble.id} className="admin-bubble-section">
+                    <div className="bubble-header-admin">
+                      <h4>
+                        {bubble.name} 
+                        <span className="bubble-type">{bubble.is_public ? '🌍 Public' : '🔒 Private'}</span>
+                      </h4>
+                      <div className="bubble-meta">
+                        <span>by @{bubble.creator_username}</span>
+                        <span>Code: <code>{bubble.invite_code}</code></span>
+                        <span>{new Date(bubble.created_at).toLocaleDateString()}</span>
+                      </div>
+                    </div>
+                    
+                    <div className="bubble-members-admin">
+                      <h5>👥 Members ({bubble.member_count}/{bubble.max_members})</h5>
+                      <div className="members-grid">
+                        {bubble.members && bubble.members.map(member => (
+                          <div key={member.id} className="member-card">
+                            <div className="member-info">
+                              <strong>@{member.username}</strong>
+                              <span className="member-name">{member.display_name}</span>
+                              <span className={`role-badge ${member.role}`}>
+                                {member.role === 'creator' ? '👑' : member.role === 'admin' ? '🛡️' : '👤'} {member.role}
+                              </span>
+                            </div>
+                            {member.role !== 'creator' && (
+                              <button 
+                                onClick={() => adminKickUserFromBubble(bubble.id, member.id, member.username, bubble.name)}
+                                className="admin-kick-btn"
+                                title={`Kick ${member.username} from ${bubble.name}`}
+                              >
+                                👢 Kick
+                              </button>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                ))}
               </div>
             )}
 
@@ -1002,6 +1065,7 @@ function App() {
                         <th>Bubbles Joined</th>
                         <th>Linked Platforms</th>
                         <th>Joined</th>
+                        <th>Actions</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -1019,6 +1083,17 @@ function App() {
                           <td>{user.bubbles_joined}</td>
                           <td>{user.linked_platforms || 'None'}</td>
                           <td>{new Date(user.created_at).toLocaleDateString()}</td>
+                          <td>
+                            {user.role !== 'admin' && (
+                              <button 
+                                onClick={() => adminDeleteUser(user.id, user.username)}
+                                className="admin-delete-btn"
+                                title="Delete User Account"
+                              >
+                                🗑️ Delete
+                              </button>
+                            )}
+                          </td>
                         </tr>
                       ))}
                     </tbody>
