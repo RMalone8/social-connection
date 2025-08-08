@@ -18,6 +18,85 @@ export default {
   },
 };
 
+let coreSchemaReady = false;
+async function ensureCoreSchema(env) {
+  if (coreSchemaReady) return;
+  try {
+    // native_accounts
+    await env.DB.exec(
+      "CREATE TABLE IF NOT EXISTS native_accounts (" +
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+        "username TEXT UNIQUE NOT NULL, " +
+        "email TEXT UNIQUE NOT NULL, " +
+        "password_hash TEXT NOT NULL, " +
+        "display_name TEXT, " +
+        "avatar_url TEXT, " +
+        "created_at TEXT DEFAULT CURRENT_TIMESTAMP" +
+      ")"
+    );
+    // social_accounts
+    await env.DB.exec(
+      "CREATE TABLE IF NOT EXISTS social_accounts (" +
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+        "native_account_id INTEGER NOT NULL, " +
+        "platform TEXT NOT NULL, " +
+        "platform_id TEXT NOT NULL, " +
+        "platform_username TEXT, " +
+        "platform_name TEXT, " +
+        "avatar_url TEXT, " +
+        "profile_url TEXT, " +
+        "access_token TEXT, " +
+        "created_at TEXT DEFAULT CURRENT_TIMESTAMP, " +
+        "updated_at TEXT DEFAULT CURRENT_TIMESTAMP, " +
+        "FOREIGN KEY (native_account_id) REFERENCES native_accounts (id), " +
+        "UNIQUE(platform, platform_id)" +
+      ")"
+    );
+    // sessions
+    await env.DB.exec(
+      "CREATE TABLE IF NOT EXISTS sessions (" +
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+        "session_token TEXT UNIQUE NOT NULL, " +
+        "native_account_id INTEGER NOT NULL, " +
+        "created_at TEXT DEFAULT CURRENT_TIMESTAMP, " +
+        "expires_at TEXT NOT NULL, " +
+        "FOREIGN KEY (native_account_id) REFERENCES native_accounts (id)" +
+      ")"
+    );
+    // bubbles
+    await env.DB.exec(
+      "CREATE TABLE IF NOT EXISTS bubbles (" +
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+        "name TEXT NOT NULL, " +
+        "description TEXT, " +
+        "creator_id INTEGER NOT NULL, " +
+        "is_public INTEGER DEFAULT 1, " +
+        "invite_code TEXT UNIQUE, " +
+        "max_members INTEGER DEFAULT 50, " +
+        "created_at TEXT DEFAULT CURRENT_TIMESTAMP, " +
+        "updated_at TEXT DEFAULT CURRENT_TIMESTAMP, " +
+        "FOREIGN KEY (creator_id) REFERENCES native_accounts (id)" +
+      ")"
+    );
+    // bubble_memberships
+    await env.DB.exec(
+      "CREATE TABLE IF NOT EXISTS bubble_memberships (" +
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+        "bubble_id INTEGER NOT NULL, " +
+        "user_id INTEGER NOT NULL, " +
+        "role TEXT DEFAULT 'member', " +
+        "joined_at TEXT DEFAULT CURRENT_TIMESTAMP, " +
+        "FOREIGN KEY (bubble_id) REFERENCES bubbles (id) ON DELETE CASCADE, " +
+        "FOREIGN KEY (user_id) REFERENCES native_accounts (id) ON DELETE CASCADE, " +
+        "UNIQUE(bubble_id, user_id)" +
+      ")"
+    );
+    coreSchemaReady = true;
+  } catch (e) {
+    console.error('Schema ensure error:', e);
+  }
+}
+
 async function handleApiRoutes(request, env, url) {
   // Native account authentication
   if (url.pathname === "/api/auth/register") {
@@ -30,6 +109,19 @@ async function handleApiRoutes(request, env, url) {
 
   if (url.pathname === "/api/auth/logout") {
     return handleLogout(request, env);
+  }
+
+  // Admin-only routes
+  if (url.pathname === "/api/admin/bubbles" && request.method === "GET") {
+    return handleAdminGetAllBubbles(request, env);
+  }
+
+  if (url.pathname === "/api/admin/users" && request.method === "GET") {
+    return handleAdminGetAllUsers(request, env);
+  }
+
+  if (url.pathname === "/api/admin/stats" && request.method === "GET") {
+    return handleAdminGetStats(request, env);
   }
 
   // Social media linking (requires native login first)
@@ -134,13 +226,20 @@ async function handleApiRoutes(request, env, url) {
     return getSpotifyFollowers(request, env);
   }
 
-  // Original API endpoint - now with database logging
-  if (url.pathname.startsWith("/api/")) {
-    return logDatabaseContents(env);
-  }
-
   if (url.pathname === "/api/link/github/unlink" && request.method === 'POST') {
     return handleGitHubUnlink(request, env);
+  }
+
+  if (url.pathname === "/api/auth/request-password-reset" && request.method === 'POST') {
+    return handlePasswordResetRequest(request, env);
+  }
+
+  if (url.pathname === "/api/auth/reset-password" && request.method === 'POST') {
+    return handlePasswordResetSubmit(request, env);
+  }
+
+  if (url.pathname === "/api/user/profile" && (request.method === 'POST' || request.method === 'PATCH')) {
+    return handleUpdateProfile(request, env);
   }
 
   return new Response(null, { status: 404 });
@@ -235,6 +334,12 @@ async function getNativeAccountByUsername(env, username) {
   ).bind(username).first();
 }
 
+async function getNativeAccountByUsernameOrEmail(env, identifier) {
+  return await env.DB.prepare(
+    "SELECT * FROM native_accounts WHERE username = ? OR email = ?"
+  ).bind(identifier, identifier).first();
+}
+
 async function linkSocialAccount(env, nativeAccountId, platform, platformData, accessToken) {
   console.log('Linking social account:', { platform, platformData, nativeAccountId });
   
@@ -314,7 +419,7 @@ async function getSessionUser(env, sessionToken) {
   if (!sessionToken) return null;
 
   const result = await env.DB.prepare(`
-    SELECT s.*, n.id as account_id, n.username, n.email, n.display_name
+    SELECT s.*, n.id as account_id, n.username, n.email, n.display_name, n.avatar_url, n.role
     FROM sessions s
     JOIN native_accounts n ON s.native_account_id = n.id
     WHERE s.session_token = ? AND s.expires_at > datetime('now')
@@ -343,96 +448,6 @@ async function deleteSession(env, sessionToken) {
   ).bind(sessionToken).run();
 }
 
-async function logDatabaseContents(env) {
-  try {
-    console.log("=== DATABASE CONTENTS ===");
-    
-    // Query all users
-    const users = await env.DB.prepare("SELECT * FROM users").all();
-    console.log("\n--- USERS TABLE ---");
-    console.log(`Found ${users.results.length} users:`);
-    users.results.forEach((user, index) => {
-      console.log(`User ${index + 1}:`, {
-        id: user.id,
-        github_id: user.github_id,
-        login: user.login,
-        name: user.name,
-        avatar_url: user.avatar_url,
-        created_at: user.created_at,
-        updated_at: user.updated_at
-      });
-    });
-
-    // Query all sessions
-    const sessions = await env.DB.prepare("SELECT * FROM sessions").all();
-    console.log("\n--- SESSIONS TABLE ---");
-    console.log(`Found ${sessions.results.length} sessions:`);
-    sessions.results.forEach((session, index) => {
-      console.log(`Session ${index + 1}:`, {
-        id: session.id,
-        session_token: session.session_token.substring(0, 16) + "...", // Only show first 16 chars for security
-        user_id: session.user_id,
-        expires_at: session.expires_at,
-        created_at: session.created_at
-      });
-    });
-
-    // Query active sessions (not expired)
-    const activeSessions = await env.DB.prepare(`
-      SELECT s.*, u.login as user_login FROM sessions s
-      JOIN users u ON s.user_id = u.id
-      WHERE s.expires_at > datetime('now')
-    `).all();
-    console.log("\n--- ACTIVE SESSIONS (Currently Logged In) ---");
-    console.log(`Found ${activeSessions.results.length} active sessions:`);
-    activeSessions.results.forEach((session, index) => {
-      console.log(`Active Session ${index + 1}:`, {
-        user_login: session.user_login,
-        expires_at: session.expires_at,
-        created_at: session.created_at
-      });
-    });
-
-    // Query all sessions with tokens (including offline users)
-    const tokensAvailable = await env.DB.prepare(`
-      SELECT s.*, u.login as user_login FROM sessions s
-      JOIN users u ON s.user_id = u.id
-      WHERE s.github_token IS NOT NULL AND s.github_token != ''
-    `).all();
-    console.log("\n--- ALL AVAILABLE TOKENS (Including Offline Users) ---");
-    console.log(`Found ${tokensAvailable.results.length} stored tokens:`);
-    tokensAvailable.results.forEach((session, index) => {
-      const isActive = new Date(session.expires_at) > new Date();
-      console.log(`Token ${index + 1}:`, {
-        user_login: session.user_login,
-        status: isActive ? 'ONLINE' : 'OFFLINE',
-        expires_at: session.expires_at,
-        created_at: session.created_at
-      });
-    });
-
-    console.log("\n=== END DATABASE CONTENTS ===\n");
-
-    // Return the original response so the frontend still works
-    return Response.json({
-      name: "Ryan",
-      database_logged: true,
-      users_count: users.results.length,
-      sessions_count: sessions.results.length,
-      active_sessions_count: activeSessions.results.length,
-      available_tokens_count: tokensAvailable.results.length,
-      offline_tokens_count: tokensAvailable.results.length - activeSessions.results.length
-    });
-
-  } catch (error) {
-    console.error("Error logging database contents:", error);
-      return Response.json({
-        name: "Ryan",
-      database_error: error.message
-      });
-    }
-}
-
 // Generate a random state parameter for OAuth security
 function generateState() {
   return Array.from(crypto.getRandomValues(new Uint8Array(16)))
@@ -445,6 +460,16 @@ function generateSessionToken() {
   return Array.from(crypto.getRandomValues(new Uint8Array(32)))
     .map(b => b.toString(16).padStart(2, '0'))
     .join('');
+}
+
+// Basic server-side email validation
+function isValidEmail(email) {
+  if (!email || typeof email !== 'string') return false;
+  const trimmed = email.trim();
+  if (trimmed.length === 0 || trimmed.length > 254) return false;
+  // Simple pragmatic regex; avoids catastrophic backtracking
+  const re = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  return re.test(trimmed);
 }
 
 // Handle native account registration
@@ -467,10 +492,19 @@ async function handleRegister(request, env) {
       });
     }
 
+    // Normalize and validate email
+    const normalizedEmail = String(email).trim().toLowerCase();
+    if (!isValidEmail(normalizedEmail)) {
+      return new Response(JSON.stringify({ error: 'Invalid email address' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
     // Check if username or email already exists
     const existingUser = await env.DB.prepare(
       "SELECT id FROM native_accounts WHERE username = ? OR email = ?"
-    ).bind(username, email).first();
+    ).bind(username, normalizedEmail).first();
 
     if (existingUser) {
       console.log('Registration failed: Username or email already exists', { username, email });
@@ -481,8 +515,8 @@ async function handleRegister(request, env) {
     }
 
     // Create new account
-    console.log('Creating new account for:', { username, email, display_name });
-    const newAccount = await createNativeAccount(env, username, email, password, display_name);
+    console.log('Creating new account for:', { username, email: normalizedEmail, display_name });
+    const newAccount = await createNativeAccount(env, username, normalizedEmail, password, display_name?.trim?.() || null);
     console.log('Account created successfully:', newAccount);
     
     // Create session
@@ -491,7 +525,7 @@ async function handleRegister(request, env) {
 
     const headers = new Headers();
     headers.set('Content-Type', 'application/json');
-    headers.append('Set-Cookie', `session=${sessionToken}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${7 * 24 * 60 * 60}`);
+    headers.append('Set-Cookie', `session=${sessionToken}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=${7 * 24 * 60 * 60}`);
 
     return new Response(JSON.stringify({
       success: true,
@@ -529,7 +563,7 @@ async function handleLogin(request, env) {
     }
 
     // Get user account
-    const account = await getNativeAccountByUsername(env, username);
+    const account = await getNativeAccountByUsernameOrEmail(env, username);
     if (!account) {
       return new Response(JSON.stringify({ error: 'Invalid username or password' }), {
         status: 401,
@@ -563,7 +597,7 @@ async function handleLogin(request, env) {
 
     const headers = new Headers();
     headers.set('Content-Type', 'application/json');
-    headers.append('Set-Cookie', `session=${sessionToken}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${7 * 24 * 60 * 60}`);
+    headers.append('Set-Cookie', `session=${sessionToken}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=${7 * 24 * 60 * 60}`);
 
     return new Response(JSON.stringify({
       success: true,
@@ -1069,6 +1103,8 @@ async function handleUserInfo(request, env) {
     username: sessionUser.username,
     email: sessionUser.email,
     display_name: sessionUser.display_name,
+    avatar_url: sessionUser.avatar_url || null,
+    role: sessionUser.role || 'user',
     social_accounts: sessionUser.social_accounts.map(account => ({
       platform: account.platform,
       platform_username: account.platform_username,
@@ -1803,14 +1839,19 @@ function handlePrivacyPolicy() {
 // Get user's bubbles (created and joined)
 async function handleGetUserBubbles(request, env) {
   try {
+    console.log('=== GET USER BUBBLES DEBUG START ===');
     const cookies = parseCookies(request.headers.get('Cookie') || '');
+    console.log('Cookies received:', cookies);
     const sessionUser = await getSessionUser(env, cookies.session);
+    console.log('Session user result:', sessionUser);
     
     if (!sessionUser) {
+      console.log('No session user - returning 401');
       return new Response('Not authenticated', { status: 401 });
     }
 
     // Get bubbles the user is a member of
+    console.log('Querying user bubbles for account_id:', sessionUser.account_id);
     const bubbles = await env.DB.prepare(`
       SELECT 
         b.id,
@@ -1831,10 +1872,16 @@ async function handleGetUserBubbles(request, env) {
       GROUP BY b.id, b.name, b.description, b.is_public, b.invite_code, b.max_members, b.created_at, bm.role, na.display_name
       ORDER BY b.created_at DESC
     `).bind(sessionUser.account_id).all();
+    console.log('Bubbles query result:', bubbles);
+    console.log('Number of bubbles found:', bubbles.results?.length || 0);
 
+    console.log('=== GET USER BUBBLES SUCCESS ===');
     return Response.json(bubbles.results);
   } catch (error) {
+    console.error('=== GET USER BUBBLES ERROR ===');
     console.error('Error getting user bubbles:', error);
+    console.error('Error stack:', error.stack);
+    console.error('Error message:', error.message);
     return new Response('Server error', { status: 500 });
   }
 }
@@ -1842,23 +1889,40 @@ async function handleGetUserBubbles(request, env) {
 // Create a new bubble
 async function handleCreateBubble(request, env) {
   try {
+    console.log('=== CREATE BUBBLE DEBUG START ===');
     const cookies = parseCookies(request.headers.get('Cookie') || '');
+    console.log('Cookies received:', cookies);
     const sessionUser = await getSessionUser(env, cookies.session);
+    console.log('Session user result:', sessionUser);
     
     if (!sessionUser) {
+      console.log('No session user - returning 401');
       return new Response('Not authenticated', { status: 401 });
     }
 
+    console.log('Parsing request body...');
     const { name, description, isPublic, maxMembers } = await request.json();
+    console.log('Request data:', { name, description, isPublic, maxMembers });
     
     if (!name || name.trim().length === 0) {
+      console.log('Invalid name - returning 400');
       return Response.json({ error: 'Bubble name is required' }, { status: 400 });
     }
 
     // Generate invite code
     const inviteCode = Math.random().toString(36).substring(2, 10).toUpperCase();
+    console.log('Generated invite code:', inviteCode);
 
     // Create bubble
+    console.log('Creating bubble in database...');
+    console.log('Bubble data to insert:', {
+      name: name.trim(),
+      description: description?.trim() || null,
+      creator_id: sessionUser.account_id,
+      is_public: isPublic !== false,
+      invite_code: inviteCode,
+      max_members: maxMembers || 50
+    });
     const bubbleResult = await env.DB.prepare(`
       INSERT INTO bubbles (name, description, creator_id, is_public, invite_code, max_members)
       VALUES (?, ?, ?, ?, ?, ?)
@@ -1870,14 +1934,18 @@ async function handleCreateBubble(request, env) {
       inviteCode,
       maxMembers || 50
     ).run();
+    console.log('Bubble creation result:', bubbleResult);
 
     // Add creator as member with creator role
+    console.log('Adding creator as member...');
     await env.DB.prepare(`
       INSERT INTO bubble_memberships (bubble_id, user_id, role)
       VALUES (?, ?, 'creator')
     `).bind(bubbleResult.meta.last_row_id, sessionUser.account_id).run();
+    console.log('Creator membership added successfully');
 
     // Return the created bubble
+    console.log('Fetching created bubble data...');
     const bubble = await env.DB.prepare(`
       SELECT 
         b.id,
@@ -1893,10 +1961,16 @@ async function handleCreateBubble(request, env) {
       FROM bubbles b
       WHERE b.id = ?
     `).bind(sessionUser.display_name, bubbleResult.meta.last_row_id).first();
+    console.log('Final bubble data:', bubble);
 
+    console.log('=== CREATE BUBBLE SUCCESS ===');
     return Response.json(bubble);
   } catch (error) {
+    console.error('=== CREATE BUBBLE ERROR ===');
     console.error('Error creating bubble:', error);
+    console.error('Error stack:', error.stack);
+    console.error('Error message:', error.message);
+    console.error('Error name:', error.name);
     return new Response('Server error', { status: 500 });
   }
 }
@@ -2354,5 +2428,367 @@ async function handleGitHubUnlink(request, env) {
   } catch (error) {
     console.error('Error unlinking GitHub:', error);
     return Response.json({ error: 'Failed to unlink GitHub' }, { status: 500 });
+  }
+}
+
+// Ensure password_resets table exists
+async function ensurePasswordResetsTable(env) {
+  const sql = "CREATE TABLE IF NOT EXISTS password_resets (" +
+    "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
+    "user_id INTEGER NOT NULL, " +
+    "code_salt TEXT NOT NULL, " +
+    "code_hash TEXT NOT NULL, " +
+    "expires_at TEXT NOT NULL, " +
+    "attempts INTEGER DEFAULT 0, " +
+    "used INTEGER DEFAULT 0, " +
+    "created_at TEXT DEFAULT CURRENT_TIMESTAMP, " +
+    "FOREIGN KEY (user_id) REFERENCES native_accounts (id)" +
+  ")";
+  await env.DB.exec(sql);
+}
+
+function generateSixDigitCode() {
+  const num = Math.floor(100000 + Math.random() * 900000);
+  return String(num);
+}
+
+async function hashResetCode(code, salt) {
+  const enc = new TextEncoder();
+  const data = enc.encode(code + ':' + salt);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+  const bytes = new Uint8Array(hashBuffer);
+  let hex = '';
+  for (const b of bytes) hex += b.toString(16).padStart(2, '0');
+  return hex;
+}
+
+async function sendEmail(env, to, subject, text) {
+  try {
+    if (env.RESEND_API_KEY) {
+      const res = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${env.RESEND_API_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          from: env.EMAIL_FROM || 'no-reply@bubbly.app',
+          to: [to],
+          subject,
+          text
+        })
+      });
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        console.error('Resend API error:', res.status, body);
+      }
+      return res.ok;
+    }
+  } catch (e) {
+    console.error('Email send error:', e);
+  }
+  console.log('DEV EMAIL (no provider):', { to, subject, text });
+  return true;
+}
+
+async function handlePasswordResetRequest(request, env) {
+  try {
+    const { email } = await request.json();
+    if (!email) return Response.json({ message: 'If the account exists, a code has been sent' });
+
+    await ensurePasswordResetsTable(env);
+
+    const user = await env.DB.prepare('SELECT id, email FROM native_accounts WHERE email = ?')
+      .bind(email).first();
+
+    // Always respond the same to avoid user enumeration
+    const genericResponse = Response.json({ message: 'If the account exists, a code has been sent' });
+    if (!user) return genericResponse;
+
+    // Create code
+    const code = generateSixDigitCode();
+    const salt = toBase64(crypto.getRandomValues(new Uint8Array(16)));
+    const codeHash = await hashResetCode(code, salt);
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+
+    // Invalidate previous codes for this user
+    await env.DB.prepare('DELETE FROM password_resets WHERE user_id = ? OR expires_at < datetime("now")')
+      .bind(user.id).run();
+
+    await env.DB.prepare(`
+      INSERT INTO password_resets (user_id, code_salt, code_hash, expires_at)
+      VALUES (?, ?, ?, ?)
+    `).bind(user.id, salt, codeHash, expiresAt).run();
+
+    await sendEmail(env, user.email, 'Your Bubbly reset code', `Your reset code is: ${code}. It expires in 10 minutes.`);
+
+    return genericResponse;
+  } catch (error) {
+    console.error('Password reset request error:', error);
+    return Response.json({ message: 'If the account exists, a code has been sent' });
+  }
+}
+
+async function handlePasswordResetSubmit(request, env) {
+  try {
+    const { email, code, new_password } = await request.json();
+    if (!email || !code || !new_password) {
+      return Response.json({ error: 'Missing fields' }, { status: 400 });
+    }
+
+    await ensurePasswordResetsTable(env);
+    const user = await env.DB.prepare('SELECT id FROM native_accounts WHERE email = ?')
+      .bind(email).first();
+    if (!user) return Response.json({ error: 'Invalid code' }, { status: 400 });
+
+    const pr = await env.DB.prepare(`
+      SELECT * FROM password_resets WHERE user_id = ? AND used = 0 AND expires_at > datetime('now') ORDER BY created_at DESC LIMIT 1
+    `).bind(user.id).first();
+    if (!pr) return Response.json({ error: 'Invalid or expired code' }, { status: 400 });
+
+    // Increment attempts and check
+    const attempts = pr.attempts || 0;
+    if (attempts >= 5) return Response.json({ error: 'Too many attempts. Request a new code.' }, { status: 429 });
+
+    const computedHash = await hashResetCode(code, pr.code_salt);
+    if (computedHash !== pr.code_hash) {
+      await env.DB.prepare('UPDATE password_resets SET attempts = attempts + 1 WHERE id = ?').bind(pr.id).run();
+      return Response.json({ error: 'Invalid code' }, { status: 400 });
+    }
+
+    // Valid: update password and mark used
+    const newHash = await hashPasswordPBKDF2(new_password);
+    await env.DB.prepare('UPDATE native_accounts SET password_hash = ? WHERE id = ?')
+      .bind(newHash, user.id).run();
+    await env.DB.prepare('UPDATE password_resets SET used = 1 WHERE id = ?').bind(pr.id).run();
+
+    return Response.json({ success: true });
+  } catch (error) {
+    console.error('Password reset submit error:', error);
+    return Response.json({ error: 'Failed to reset password' }, { status: 500 });
+  }
+}
+
+async function ensureAvatarColumn(env) {
+  try {
+    await env.DB.exec("ALTER TABLE native_accounts ADD COLUMN avatar_url TEXT");
+  } catch (e) {
+    // ignore if exists
+  }
+}
+
+function isValidHttpUrl(url) {
+  if (!url) return false;
+  try {
+    const u = new URL(url);
+    return u.protocol === 'http:' || u.protocol === 'https:';
+  } catch { return false; }
+}
+
+async function handleUpdateProfile(request, env) {
+  try {
+    const cookies = parseCookies(request.headers.get('Cookie') || '');
+    const sessionUser = await getSessionUser(env, cookies.session);
+    if (!sessionUser) return new Response('Not authenticated', { status: 401 });
+
+    await ensureAvatarColumn(env);
+
+    const body = await request.json().catch(() => ({}));
+    let { display_name, avatar_url } = body;
+
+    const updates = [];
+    const binds = [];
+
+    if (typeof display_name === 'string') {
+      const dn = display_name.trim();
+      if (dn.length < 1 || dn.length > 60) {
+        return Response.json({ error: 'Display name must be 1-60 characters' }, { status: 400 });
+      }
+      updates.push('display_name = ?');
+      binds.push(dn);
+    }
+
+    if (avatar_url !== undefined) {
+      if (avatar_url === null || avatar_url === '') {
+        updates.push('avatar_url = NULL');
+      } else {
+        if (!isValidHttpUrl(String(avatar_url))) {
+          return Response.json({ error: 'Invalid avatar URL' }, { status: 400 });
+        }
+        updates.push('avatar_url = ?');
+        binds.push(String(avatar_url));
+      }
+    }
+
+    if (updates.length === 0) {
+      return Response.json({ error: 'No changes provided' }, { status: 400 });
+    }
+
+    binds.push(sessionUser.account_id);
+    const sql = `UPDATE native_accounts SET ${updates.join(', ')} WHERE id = ?`;
+    await env.DB.prepare(sql).bind(...binds).run();
+
+    // Return updated user info
+    const refreshed = await getSessionUser(env, cookies.session);
+    return Response.json({
+      id: refreshed.account_id,
+      username: refreshed.username,
+      email: refreshed.email,
+      display_name: refreshed.display_name,
+      avatar_url: refreshed.avatar_url || null
+    });
+  } catch (error) {
+    console.error('Update profile error:', error);
+    return Response.json({ error: 'Failed to update profile' }, { status: 500 });
+  }
+}
+
+// Admin Authorization Helper
+async function requireAdmin(request, env) {
+  const cookies = parseCookies(request.headers.get('Cookie') || '');
+  const sessionUser = await getSessionUser(env, cookies.session);
+  
+  if (!sessionUser) {
+    return { error: new Response('Not authenticated', { status: 401 }), user: null };
+  }
+  
+  if (sessionUser.role !== 'admin') {
+    return { error: new Response('Admin access required', { status: 403 }), user: null };
+  }
+  
+  return { error: null, user: sessionUser };
+}
+
+// Admin: Get all bubbles (public and private)
+async function handleAdminGetAllBubbles(request, env) {
+  try {
+    const { error, user } = await requireAdmin(request, env);
+    if (error) return error;
+
+    console.log(`Admin ${user.username} accessing all bubbles`);
+
+    const bubbles = await env.DB.prepare(`
+      SELECT 
+        b.id,
+        b.name,
+        b.description,
+        b.is_public,
+        b.invite_code,
+        b.max_members,
+        b.created_at,
+        b.updated_at,
+        COUNT(bm.user_id) as member_count,
+        na.username as creator_username,
+        na.display_name as creator_name
+      FROM bubbles b
+      JOIN native_accounts na ON b.creator_id = na.id
+      LEFT JOIN bubble_memberships bm ON b.id = bm.bubble_id
+      GROUP BY b.id, b.name, b.description, b.is_public, b.invite_code, b.max_members, b.created_at, b.updated_at, na.username, na.display_name
+      ORDER BY b.created_at DESC
+    `).all();
+
+    return Response.json({
+      bubbles: bubbles.results,
+      total: bubbles.results.length
+    });
+  } catch (error) {
+    console.error('Admin get all bubbles error:', error);
+    return new Response('Server error', { status: 500 });
+  }
+}
+
+// Admin: Get all users
+async function handleAdminGetAllUsers(request, env) {
+  try {
+    const { error, user } = await requireAdmin(request, env);
+    if (error) return error;
+
+    console.log(`Admin ${user.username} accessing all users`);
+
+    const users = await env.DB.prepare(`
+      SELECT 
+        na.id,
+        na.username,
+        na.email,
+        na.display_name,
+        na.role,
+        na.created_at,
+        COUNT(DISTINCT bm.bubble_id) as bubbles_joined,
+        COUNT(DISTINCT b.id) as bubbles_created,
+        GROUP_CONCAT(DISTINCT sa.platform) as linked_platforms
+      FROM native_accounts na
+      LEFT JOIN bubble_memberships bm ON na.id = bm.user_id
+      LEFT JOIN bubbles b ON na.id = b.creator_id
+      LEFT JOIN social_accounts sa ON na.id = sa.native_account_id
+      GROUP BY na.id, na.username, na.email, na.display_name, na.role, na.created_at
+      ORDER BY na.created_at DESC
+    `).all();
+
+    return Response.json({
+      users: users.results,
+      total: users.results.length
+    });
+  } catch (error) {
+    console.error('Admin get all users error:', error);
+    return new Response('Server error', { status: 500 });
+  }
+}
+
+// Admin: Get platform stats
+async function handleAdminGetStats(request, env) {
+  try {
+    const { error, user } = await requireAdmin(request, env);
+    if (error) return error;
+
+    console.log(`Admin ${user.username} accessing platform stats`);
+
+    // Get various stats
+    const totalUsers = await env.DB.prepare('SELECT COUNT(*) as count FROM native_accounts').first();
+    const totalBubbles = await env.DB.prepare('SELECT COUNT(*) as count FROM bubbles').first();
+    const publicBubbles = await env.DB.prepare('SELECT COUNT(*) as count FROM bubbles WHERE is_public = 1').first();
+    const privateBubbles = await env.DB.prepare('SELECT COUNT(*) as count FROM bubbles WHERE is_public = 0').first();
+    const totalMemberships = await env.DB.prepare('SELECT COUNT(*) as count FROM bubble_memberships').first();
+    const activeSessions = await env.DB.prepare("SELECT COUNT(*) as count FROM sessions WHERE datetime(expires_at) > datetime('now')").first();
+    
+    // Platform breakdown
+    const platformStats = await env.DB.prepare(`
+      SELECT platform, COUNT(*) as count 
+      FROM social_accounts 
+      GROUP BY platform 
+      ORDER BY count DESC
+    `).all();
+
+    // Recent activity
+    const recentUsers = await env.DB.prepare(`
+      SELECT username, display_name, created_at 
+      FROM native_accounts 
+      ORDER BY created_at DESC 
+      LIMIT 10
+    `).all();
+
+    const recentBubbles = await env.DB.prepare(`
+      SELECT b.name, b.is_public, b.created_at, na.username as creator 
+      FROM bubbles b 
+      JOIN native_accounts na ON b.creator_id = na.id 
+      ORDER BY b.created_at DESC 
+      LIMIT 10
+    `).all();
+
+    return Response.json({
+      stats: {
+        total_users: totalUsers.count,
+        total_bubbles: totalBubbles.count,
+        public_bubbles: publicBubbles.count,
+        private_bubbles: privateBubbles.count,
+        total_memberships: totalMemberships.count,
+        active_sessions: activeSessions.count
+      },
+      platform_stats: platformStats.results,
+      recent_users: recentUsers.results,
+      recent_bubbles: recentBubbles.results
+    });
+  } catch (error) {
+    console.error('Admin get stats error:', error);
+    return new Response('Server error', { status: 500 });
   }
 }

@@ -42,7 +42,8 @@
 		"GITHUB_CLIENT_ID": "Ov23liyFnzqrCBTrkIhX",
 		"GITHUB_REDIRECT_URI": "https://social.moose.boston/api/link/github/callback",
 		"SPOTIFY_CLIENT_ID": "fb93e89c3374464992c103ffa45b1a65",
-		"SPOTIFY_REDIRECT_URI": "https://social.moose.boston/api/link/spotify/callback"
+		"SPOTIFY_REDIRECT_URI": "https://social.moose.boston/api/link/spotify/callback",
+		"EMAIL_FROM": "no-reply@social.moose.boston"
 	}
 	/**
 	 * Smart Placement

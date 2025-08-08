@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import './App.css'
+import { useRef } from 'react'
 
 function App() {
   const [user, setUser] = useState(null)
@@ -8,19 +9,33 @@ function App() {
   
   // Dashboard states
   const [currentView, setCurrentView] = useState('dashboard') // 'dashboard', 'bubble', 'discover'
+  const [profileDisplayName, setProfileDisplayName] = useState('')
+  const [profileAvatarUrl, setProfileAvatarUrl] = useState('')
   const [userBubbles, setUserBubbles] = useState([])
   const [publicBubbles, setPublicBubbles] = useState([])
   const [selectedBubble, setSelectedBubble] = useState(null)
   const [bubbleMembers, setBubbleMembers] = useState([])
+  const containerRef = useRef(null)
   
   // Modal states
   const [showCreateModal, setShowCreateModal] = useState(false)
   const [showJoinModal, setShowJoinModal] = useState(false)
   const [inviteCode, setInviteCode] = useState('')
+  const [showResetModal, setShowResetModal] = useState(false)
+  const [resetEmail, setResetEmail] = useState('')
+  const [resetStep, setResetStep] = useState('request') // 'request' | 'verify'
+  const [resetCode, setResetCode] = useState('')
+  const [resetNewPassword, setResetNewPassword] = useState('')
 
   // Bubble positioning states
   const [isFloatingEnabled, setIsFloatingEnabled] = useState(true)
   const [bubblePositions, setBubblePositions] = useState(new Map())
+  const physicsRef = useRef({ running: false, nodes: new Map(), rafId: 0, radius: 60 })
+
+  // Admin state
+  const [adminBubbles, setAdminBubbles] = useState([]);
+  const [adminUsers, setAdminUsers] = useState([]);
+  const [adminStats, setAdminStats] = useState(null);
 
   useEffect(() => {
     checkAuthStatus()
@@ -46,19 +61,141 @@ function App() {
     }
   }, [user])
 
-  const checkAuthStatus = async () => {
-    try {
-      const response = await fetch('/api/user')
-      if (response.ok) {
-        const userData = await response.json()
-        setUser(userData)
+  // Physics engine for floating bubbles (avoid overlap)
+  useEffect(() => {
+    if (!isFloatingEnabled || !selectedBubble || bubbleMembers.length === 0) {
+      stopPhysics()
+      return
+    }
+    startPhysics()
+    return stopPhysics
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isFloatingEnabled, selectedBubble?.id, bubbleMembers.length])
+
+  const startPhysics = () => {
+    const container = containerRef.current
+    if (!container) return
+    const rect = container.getBoundingClientRect()
+    const width = rect.width
+    const height = rect.height || 400
+    const radius = 60 // matches 120px diameter
+    physicsRef.current.radius = radius
+    const nodes = new Map()
+    // Initialize positions and velocities
+    bubbleMembers.forEach((member, index) => {
+      let x = Math.random() * (width - 2 * radius) + radius
+      let y = Math.random() * (height - 2 * radius) + radius
+      // Ensure not exactly overlapping initial
+      for (let tries = 0; tries < 50; tries++) {
+        let overlap = false
+        for (const [, n] of nodes) {
+          const dx = x - n.x
+          const dy = y - n.y
+          const dist = Math.hypot(dx, dy)
+          if (dist < radius * 2) { overlap = true; break }
+        }
+        if (!overlap) break
+        x = Math.random() * (width - 2 * radius) + radius
+        y = Math.random() * (height - 2 * radius) + radius
       }
-    } catch (error) {
-      console.error('Auth check failed:', error)
-    } finally {
-      setLoading(false)
+      const speed = 0.4 + (index % 3) * 0.1
+      const angle = Math.random() * Math.PI * 2
+      const vx = Math.cos(angle) * speed
+      const vy = Math.sin(angle) * speed
+      nodes.set(member.id, { x, y, vx, vy })
+    })
+    physicsRef.current.nodes = nodes
+    physicsRef.current.running = true
+    const tick = () => {
+      stepPhysics(width, height)
+      updatePositionsFromPhysics(width, height)
+      physicsRef.current.rafId = requestAnimationFrame(tick)
+    }
+    physicsRef.current.rafId = requestAnimationFrame(tick)
+  }
+
+  const stopPhysics = () => {
+    physicsRef.current.running = false
+    if (physicsRef.current.rafId) cancelAnimationFrame(physicsRef.current.rafId)
+  }
+
+  const stepPhysics = (width, height) => {
+    const nodes = physicsRef.current.nodes
+    const r = physicsRef.current.radius
+    const damping = 0.999
+    // Move
+    for (const [, n] of nodes) {
+      n.x += n.vx
+      n.y += n.vy
+      // Walls
+      if (n.x < r) { n.x = r; n.vx *= -1 }
+      if (n.x > width - r) { n.x = width - r; n.vx *= -1 }
+      if (n.y < r) { n.y = r; n.vy *= -1 }
+      if (n.y > height - r) { n.y = height - r; n.vy *= -1 }
+      n.vx *= damping
+      n.vy *= damping
+    }
+    // Collisions (naive O(n^2))
+    const arr = Array.from(nodes.values())
+    for (let i = 0; i < arr.length; i++) {
+      for (let j = i + 1; j < arr.length; j++) {
+        const a = arr[i], b = arr[j]
+        const dx = b.x - a.x
+        const dy = b.y - a.y
+        const dist = Math.hypot(dx, dy)
+        const minDist = r * 2
+        if (dist > 0 && dist < minDist) {
+          // Separate
+          const overlap = (minDist - dist) / 2
+          const nx = dx / dist
+          const ny = dy / dist
+          a.x -= nx * overlap
+          a.y -= ny * overlap
+          b.x += nx * overlap
+          b.y += ny * overlap
+          // Basic elastic response along normal
+          const va = a.vx * nx + a.vy * ny
+          const vb = b.vx * nx + b.vy * ny
+          const exchange = vb - va
+          a.vx += nx * exchange
+          a.vy += ny * exchange
+          b.vx -= nx * exchange
+          b.vy -= ny * exchange
+        }
+      }
     }
   }
+
+  const updatePositionsFromPhysics = (width, height) => {
+    const nodes = physicsRef.current.nodes
+    const newMap = new Map(bubblePositions)
+    nodes.forEach((n, id) => {
+      newMap.set(id, { x: n.x, y: n.y })
+    })
+    setBubblePositions(newMap)
+  }
+
+  const checkAuthStatus = async () => {
+    setLoading(true);
+    try {
+      const response = await fetch('/api/user');
+      if (response.ok) {
+        const userData = await response.json();
+        console.log('User data received:', userData);
+        setUser(userData);
+        setProfileDisplayName(userData.display_name || '');
+        setProfileAvatarUrl(userData.avatar_url || '');
+        fetchUserBubbles();
+      } else {
+        setUser(null);
+      }
+    } catch (error) {
+      console.error('Auth check failed:', error);
+      setUser(null);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const fetchUserBubbles = async () => {
     try {
@@ -97,7 +234,7 @@ function App() {
           // Only update member data, keep existing positions
           setBubbleMembers(data.members)
         } else {
-          // Generate new positions for new bubble or first load
+          // Generate positions; physics will refine continuously
           generateBubblePositions(data.members)
           setBubbleMembers(data.members)
         }
@@ -113,16 +250,10 @@ function App() {
     const containerPadding = 60
     
     members.forEach((member, index) => {
+      // Initialize in percent; physics will convert to px
       const randomX = Math.random() * (100 - containerPadding) + containerPadding/2
       const randomY = Math.random() * (100 - containerPadding) + containerPadding/2
-      
-      newPositions.set(member.id, {
-        x: randomX,
-        y: randomY,
-        animationName: member.id === user?.id ? 'currentUserFloat' : `bubbleFloat${(index % 5) + 1}`,
-        animationDuration: 8 + (index % 4) * 2,
-        animationDelay: index * 0.5
-      })
+      newPositions.set(member.id, { xPercent: randomX, yPercent: randomY })
     })
     
     setBubblePositions(newPositions)
@@ -135,6 +266,47 @@ function App() {
     } else {
       // Enable floating - restore original positions
       setIsFloatingEnabled(true)
+    }
+  }
+
+  const requestPasswordReset = async (e) => {
+    e.preventDefault()
+    try {
+      await fetch('/api/auth/request-password-reset', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: resetEmail })
+      })
+      alert('If the account exists, a code has been sent to your email')
+      setResetStep('verify')
+    } catch (err) {
+      alert('If the account exists, a code has been sent to your email')
+      setResetStep('verify')
+    }
+  }
+
+  const submitPasswordReset = async (e) => {
+    e.preventDefault()
+    try {
+      const res = await fetch('/api/auth/reset-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: resetEmail, code: resetCode, new_password: resetNewPassword })
+      })
+      if (res.ok) {
+        alert('Password reset! Please log in with your new password.')
+        setShowResetModal(false)
+        setResetEmail('')
+        setResetCode('')
+        setResetNewPassword('')
+        setResetStep('request')
+        setLoginForm(true)
+      } else {
+        const ejson = await res.json().catch(() => ({}))
+        alert(ejson.error || 'Reset failed')
+      }
+    } catch (err) {
+      alert('Reset failed')
     }
   }
 
@@ -228,7 +400,7 @@ function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          username: formData.get('username'),
+          username: formData.get('username'), // username or email
           password: formData.get('password')
         })
       })
@@ -441,6 +613,27 @@ function App() {
     window.location.assign("/api/link/github")
   }
 
+  const saveProfile = async (e) => {
+    e.preventDefault()
+    try {
+      const res = await fetch('/api/user/profile', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ display_name: profileDisplayName, avatar_url: profileAvatarUrl })
+      })
+      if (res.ok) {
+        const updated = await res.json()
+        setUser(prev => ({ ...prev, display_name: updated.display_name, avatar_url: updated.avatar_url }))
+        alert('Profile updated')
+      } else {
+        const err = await res.json().catch(() => ({}))
+        alert(err.error || 'Failed to update profile')
+      }
+    } catch (e) {
+      alert('Failed to update profile')
+    }
+  }
+
   const unlinkGitHub = async () => {
     if (!confirm('Unlink your GitHub account from Bubbly?')) return
     try {
@@ -457,6 +650,49 @@ function App() {
       alert('Failed to unlink GitHub')
     }
   }
+
+  // Admin functions
+  const fetchAdminBubbles = async () => {
+    try {
+      const response = await fetch('/api/admin/bubbles');
+      if (response.ok) {
+        const data = await response.json();
+        setAdminBubbles(data.bubbles);
+      } else {
+        alert('Failed to fetch admin bubbles');
+      }
+    } catch (error) {
+      alert('Failed to fetch admin bubbles');
+    }
+  };
+
+  const fetchAdminUsers = async () => {
+    try {
+      const response = await fetch('/api/admin/users');
+      if (response.ok) {
+        const data = await response.json();
+        setAdminUsers(data.users);
+      } else {
+        alert('Failed to fetch admin users');
+      }
+    } catch (error) {
+      alert('Failed to fetch admin users');
+    }
+  };
+
+  const fetchAdminStats = async () => {
+    try {
+      const response = await fetch('/api/admin/stats');
+      if (response.ok) {
+        const data = await response.json();
+        setAdminStats(data);
+      } else {
+        alert('Failed to fetch admin stats');
+      }
+    } catch (error) {
+      alert('Failed to fetch admin stats');
+    }
+  };
 
   if (loading) {
     return (
@@ -496,10 +732,10 @@ function App() {
           {loginForm ? (
             <form onSubmit={handleLogin} className="auth-form">
               <h2>🌺 Login to Bubbly</h2>
-              <input type="text" name="username" placeholder="Username" required />
+              <input type="text" name="username" placeholder="Username or Email" required />
               <input type="password" name="password" placeholder="Password" required />
               <button type="submit" className="tropical-btn">🏄‍♂️ Dive In</button>
-              <button type="button" className="forgot-password-btn" onClick={() => alert('🏝️ Forgot password feature coming soon! Contact support for now.')}>
+              <button type="button" className="forgot-password-btn" onClick={() => setShowResetModal(true)}>
                 🤔 Forgot Password?
               </button>
             </form>
@@ -526,6 +762,38 @@ function App() {
             <li>Bubble creators can manage members and roles</li>
           </ul>
         </div>
+
+        {showResetModal && (
+          <div className="modal-overlay" onClick={() => setShowResetModal(false)}>
+            <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+              {resetStep === 'request' ? (
+                <>
+                  <h3>Reset your password</h3>
+                  <form onSubmit={requestPasswordReset}>
+                    <input type="email" placeholder="Your email" value={resetEmail} onChange={(e) => setResetEmail(e.target.value)} required />
+                    <div className="modal-actions">
+                      <button type="button" onClick={() => setShowResetModal(false)}>Cancel</button>
+                      <button type="submit" className="tropical-btn">Send Code</button>
+                    </div>
+                  </form>
+                </>
+              ) : (
+                <>
+                  <h3>Enter the code we emailed you</h3>
+                  <form onSubmit={submitPasswordReset}>
+                    <input type="text" placeholder="6-digit code" value={resetCode} onChange={(e) => setResetCode(e.target.value)} required />
+                    <input type="password" placeholder="New password" value={resetNewPassword} onChange={(e) => setResetNewPassword(e.target.value)} required />
+                    <div className="modal-actions">
+                      <button type="button" onClick={() => { setShowResetModal(false); setResetStep('request') }}>Cancel</button>
+                      <button type="submit" className="tropical-btn">Reset Password</button>
+                    </div>
+                  </form>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+
       </div>
     )
   }
@@ -545,33 +813,222 @@ function App() {
         </div>
         
         {/* Navigation */}
-        <div className="dashboard-nav">
+        <nav className="dashboard-nav">
           <button 
-            className={currentView === 'dashboard' ? 'active' : ''} 
-            onClick={() => setCurrentView('dashboard')}
+            onClick={() => setCurrentView('dashboard')} 
+            className={`nav-btn ${currentView === 'dashboard' ? 'active' : ''}`}
           >
             🏠 My Bubbles
           </button>
+                      <button 
+              onClick={() => {
+                setCurrentView('discover');
+                fetchPublicBubbles();
+              }} 
+              className={`nav-btn ${currentView === 'discover' ? 'active' : ''}`}
+            >
+              🔍 Discover
+            </button>
           <button 
-            className={currentView === 'discover' ? 'active' : ''} 
-            onClick={() => {
-              setCurrentView('discover')
-              fetchPublicBubbles()
-            }}
+            onClick={() => setCurrentView('profile')} 
+            className={`nav-btn ${currentView === 'profile' ? 'active' : ''}`}
           >
-            🔍 Discover
+            👤 Profile
           </button>
+          {user.role === 'admin' && (
+            <button 
+              onClick={() => setCurrentView('admin')} 
+              className={`nav-btn ${currentView === 'admin' ? 'active' : ''}`}
+              style={{ backgroundColor: '#ff6b6b', color: 'white' }}
+            >
+              🛡️ Admin
+            </button>
+          )}
           <button onClick={() => setShowCreateModal(true)} className="create-btn">
             ➕ Create Bubble
           </button>
           <button onClick={() => setShowJoinModal(true)} className="join-btn">
             🎫 Join by Code
           </button>
-        </div>
+        </nav>
       </div>
 
       {/* Main Content */}
       <div className="dashboard-content">
+        {currentView === 'profile' && (
+          <div className="profile-section">
+            <h2>👤 Profile Settings</h2>
+            <div className="profile-form">
+              <div className="form-group">
+                <label>Display Name:</label>
+                <input
+                  type="text"
+                  value={profileDisplayName}
+                  onChange={(e) => setProfileDisplayName(e.target.value)}
+                  placeholder="Your display name"
+                  maxLength="60"
+                />
+              </div>
+              <div className="form-group">
+                <label>Avatar URL:</label>
+                <input
+                  type="url"
+                  value={profileAvatarUrl}
+                  onChange={(e) => setProfileAvatarUrl(e.target.value)}
+                  placeholder="https://example.com/avatar.jpg"
+                />
+              </div>
+              <button onClick={saveProfile} className="tropical-btn">
+                💾 Save Profile
+              </button>
+            </div>
+          </div>
+        )}
+
+        {currentView === 'admin' && user.role === 'admin' && (
+          <div className="admin-section">
+            <h2>🛡️ Admin Panel</h2>
+            <div className="admin-tabs">
+              <button onClick={fetchAdminStats} className="admin-tab-btn">
+                📊 Platform Stats
+              </button>
+              <button onClick={fetchAdminBubbles} className="admin-tab-btn">
+                🌊 All Bubbles
+              </button>
+              <button onClick={fetchAdminUsers} className="admin-tab-btn">
+                👥 All Users
+              </button>
+            </div>
+
+            {adminStats && (
+              <div className="admin-stats">
+                <h3>📊 Platform Statistics</h3>
+                <div className="stats-grid">
+                  <div className="stat-card">
+                    <h4>👥 Total Users</h4>
+                    <p>{adminStats.stats.total_users}</p>
+                  </div>
+                  <div className="stat-card">
+                    <h4>🌊 Total Bubbles</h4>
+                    <p>{adminStats.stats.total_bubbles}</p>
+                  </div>
+                  <div className="stat-card">
+                    <h4>🌍 Public Bubbles</h4>
+                    <p>{adminStats.stats.public_bubbles}</p>
+                  </div>
+                  <div className="stat-card">
+                    <h4>🔒 Private Bubbles</h4>
+                    <p>{adminStats.stats.private_bubbles}</p>
+                  </div>
+                  <div className="stat-card">
+                    <h4>🔗 Active Sessions</h4>
+                    <p>{adminStats.stats.active_sessions}</p>
+                  </div>
+                  <div className="stat-card">
+                    <h4>👥 Total Memberships</h4>
+                    <p>{adminStats.stats.total_memberships}</p>
+                  </div>
+                </div>
+                
+                <div className="recent-activity">
+                  <div className="recent-section">
+                    <h4>🆕 Recent Users</h4>
+                    <ul>
+                      {adminStats.recent_users.map(user => (
+                        <li key={user.username}>
+                          <strong>{user.display_name}</strong> (@{user.username}) - {new Date(user.created_at).toLocaleDateString()}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                  <div className="recent-section">
+                    <h4>🌊 Recent Bubbles</h4>
+                    <ul>
+                      {adminStats.recent_bubbles.map((bubble, index) => (
+                        <li key={index}>
+                          <strong>{bubble.name}</strong> by @{bubble.creator} - {bubble.is_public ? '🌍' : '🔒'} - {new Date(bubble.created_at).toLocaleDateString()}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {adminBubbles.length > 0 && (
+              <div className="admin-bubbles">
+                <h3>🌊 All Bubbles ({adminBubbles.length})</h3>
+                <div className="admin-table">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Name</th>
+                        <th>Creator</th>
+                        <th>Type</th>
+                        <th>Members</th>
+                        <th>Invite Code</th>
+                        <th>Created</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {adminBubbles.map(bubble => (
+                        <tr key={bubble.id}>
+                          <td><strong>{bubble.name}</strong></td>
+                          <td>@{bubble.creator_username}</td>
+                          <td>{bubble.is_public ? '🌍 Public' : '🔒 Private'}</td>
+                          <td>{bubble.member_count}/{bubble.max_members}</td>
+                          <td><code>{bubble.invite_code}</code></td>
+                          <td>{new Date(bubble.created_at).toLocaleDateString()}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {adminUsers.length > 0 && (
+              <div className="admin-users">
+                <h3>👥 All Users ({adminUsers.length})</h3>
+                <div className="admin-table">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Username</th>
+                        <th>Display Name</th>
+                        <th>Email</th>
+                        <th>Role</th>
+                        <th>Bubbles Created</th>
+                        <th>Bubbles Joined</th>
+                        <th>Linked Platforms</th>
+                        <th>Joined</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {adminUsers.map(user => (
+                        <tr key={user.id}>
+                          <td><strong>@{user.username}</strong></td>
+                          <td>{user.display_name}</td>
+                          <td>{user.email}</td>
+                          <td>
+                            <span className={`role-badge ${user.role}`}>
+                              {user.role === 'admin' ? '🛡️' : '👤'} {user.role}
+                            </span>
+                          </td>
+                          <td>{user.bubbles_created}</td>
+                          <td>{user.bubbles_joined}</td>
+                          <td>{user.linked_platforms || 'None'}</td>
+                          <td>{new Date(user.created_at).toLocaleDateString()}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
         {currentView === 'dashboard' && (
           <div className="bubbles-grid">
             <h2>🌊 Your Bubble Communities</h2>
@@ -590,7 +1047,7 @@ function App() {
                     key={bubble.id} 
                     className="bubble-card"
                     style={{
-                      width: `${Math.min(450, Math.max(450, 300 + (bubble.member_count || 0) * 30))}px`
+                      width: `${Math.min(700, Math.max(450, 300 + (bubble.member_count || 0) * 25))}px`
                     }}
                   >
                     <div className="bubble-header">
@@ -660,7 +1117,7 @@ function App() {
                     key={bubble.id} 
                     className="bubble-card"
                                          style={{
-                       width: `${Math.min(450, Math.max(450, 300 + (bubble.member_count || 0) * 30))}px`
+                       width: `${Math.min(700, Math.max(450, 300 + (bubble.member_count || 0) * 25))}px`
                      }}
                   >
                     <div className="bubble-header">
@@ -747,7 +1204,7 @@ function App() {
                    {isFloatingEnabled ? '🌊 Floating' : '📋 Lined Up'}
                  </button>
                </div>
-               <div className={`floating-bubbles ${isFloatingEnabled ? 'floating' : 'lined-up'}`}>
+               <div ref={containerRef} className={`floating-bubbles ${isFloatingEnabled ? 'floating' : 'lined-up'}`}>
                  {bubbleMembers.map((member, index) => {
                    const position = bubblePositions.get(member.id)
                    
@@ -757,11 +1214,10 @@ function App() {
                    const gridY = Math.floor(index / gridCols) * 25 + 15
                    
                    const bubbleStyle = isFloatingEnabled ? {
-                     left: `${position?.x || 50}%`,
-                     top: `${position?.y || 50}%`,
-                     animation: position ? `${position.animationName} ${position.animationDuration}s cubic-bezier(0.4, 0, 0.6, 1) infinite` : 'none',
-                     animationDelay: position ? `${position.animationDelay}s` : '0s',
-                     transition: 'none'
+                     left: position?.x !== undefined ? `${position.x - 60}px` : '50%',
+                     top: position?.y !== undefined ? `${position.y - 60}px` : '50%',
+                     animation: 'none',
+                     transition: 'transform 0s'
                    } : {
                      left: `${gridX}%`,
                      top: `${gridY}%`,
