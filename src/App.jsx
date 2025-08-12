@@ -407,7 +407,17 @@ function App() {
       
       if (response.ok) {
         const userData = await response.json()
-        setUser(userData)
+        console.log('Login response:', userData)
+        
+        // Update user state with complete user data
+        setUser(userData.user)
+        
+        // Update profile display name and avatar
+        setProfileDisplayName(userData.user.display_name || '')
+        setProfileAvatarUrl(userData.user.avatar_url || '')
+        
+        // Fetch user bubbles immediately
+        fetchUserBubbles()
       } else {
         const error = await response.text()
         alert('Login failed: ' + error)
@@ -436,7 +446,17 @@ function App() {
       
       if (response.ok) {
         const userData = await response.json()
-        setUser(userData)
+        console.log('Registration response:', userData)
+        
+        // Update user state with complete user data
+        setUser(userData.user)
+        
+        // Update profile display name and avatar
+        setProfileDisplayName(userData.user.display_name || '')
+        setProfileAvatarUrl(userData.user.avatar_url || '')
+        
+        // Fetch user bubbles immediately
+        fetchUserBubbles()
       } else {
         const error = await response.text()
         alert('Registration failed: ' + error)
@@ -718,6 +738,54 @@ function App() {
     }
   };
 
+  const adminPromoteUser = async (userId, username) => {
+    if (!confirm(`Are you sure you want to promote "${username}" to admin? This will give them full administrative access.`)) {
+      return;
+    }
+    
+    try {
+      const response = await fetch(`/api/admin/users/${userId}/promote`, {
+        method: 'POST'
+      });
+      
+      if (response.ok) {
+        const data = await response.json();
+        alert(data.message);
+        // Refresh the users list
+        fetchAdminUsers();
+      } else {
+        const error = await response.json();
+        alert(`Failed to promote user: ${error.error}`);
+      }
+    } catch (error) {
+      alert('Failed to promote user');
+    }
+  };
+
+  const setupFirstAdmin = async () => {
+    if (!confirm('Set up the first admin user? This will promote the first registered user to admin status.')) {
+      return;
+    }
+    
+    try {
+      const response = await fetch('/api/admin/setup', {
+        method: 'POST'
+      });
+      
+      if (response.ok) {
+        const data = await response.json();
+        alert(data.message);
+        // Refresh user data to show admin role
+        await checkAuthStatus();
+      } else {
+        const error = await response.json();
+        alert(`Failed to set up admin: ${error.error}`);
+      }
+    } catch (error) {
+      alert('Failed to set up admin');
+    }
+  };
+
   const adminKickUserFromBubble = async (bubbleId, userId, username, bubbleName) => {
     if (!confirm(`Are you sure you want to kick "${username}" from bubble "${bubbleName}"?`)) {
       return;
@@ -739,6 +807,30 @@ function App() {
       }
     } catch (error) {
       alert('Failed to kick user');
+    }
+  };
+
+  const adminDeleteBubble = async (bubbleId, bubbleName) => {
+    if (!confirm(`Are you sure you want to permanently delete bubble "${bubbleName}"? This will remove all members and cannot be undone.`)) {
+      return;
+    }
+    
+    try {
+      const response = await fetch(`/api/admin/bubbles/${bubbleId}/delete`, {
+        method: 'DELETE'
+      });
+      
+      if (response.ok) {
+        const data = await response.json();
+        alert(data.message);
+        // Refresh the bubbles list
+        fetchAdminBubbles();
+      } else {
+        const error = await response.json();
+        alert(`Failed to delete bubble: ${error.error}`);
+      }
+    } catch (error) {
+      alert('Failed to delete bubble');
     }
   };
 
@@ -883,15 +975,17 @@ function App() {
           >
             👤 Profile
           </button>
-          {user.role === 'admin' && (
-            <button 
-              onClick={() => setCurrentView('admin')} 
-              className={`nav-btn ${currentView === 'admin' ? 'active' : ''}`}
-              style={{ backgroundColor: '#ff6b6b', color: 'white' }}
-            >
-              🛡️ Admin
-            </button>
-          )}
+          <button 
+            onClick={() => setCurrentView('admin')} 
+            className={`nav-btn ${currentView === 'admin' ? 'active' : ''}`}
+            style={{ 
+              backgroundColor: user.role === 'admin' ? '#ff6b6b' : '#6c757d', 
+              color: 'white' 
+            }}
+            title={user.role === 'admin' ? 'Admin Panel' : 'Admin Setup (No admin exists yet)'}
+          >
+            {user.role === 'admin' ? '🛡️ Admin' : '⚙️ Admin Setup'}
+          </button>
           <button onClick={() => setShowCreateModal(true)} className="create-btn">
             ➕ Create Bubble
           </button>
@@ -933,22 +1027,32 @@ function App() {
           </div>
         )}
 
-        {currentView === 'admin' && user.role === 'admin' && (
+        {currentView === 'admin' && (
           <div className="admin-section">
             <h2>🛡️ Admin Panel</h2>
-            <div className="admin-tabs">
-              <button onClick={fetchAdminStats} className="admin-tab-btn">
-                📊 Platform Stats
-              </button>
-              <button onClick={fetchAdminBubbles} className="admin-tab-btn">
-                🌊 All Bubbles
-              </button>
-              <button onClick={fetchAdminUsers} className="admin-tab-btn">
-                👥 All Users
-              </button>
-            </div>
+            
+            {user.role === 'admin' ? (
+              <div className="admin-tabs">
+                <button onClick={fetchAdminStats} className="admin-tab-btn">
+                  📊 Platform Stats
+                </button>
+                <button onClick={fetchAdminBubbles} className="admin-tab-btn">
+                  🌊 All Bubbles
+                </button>
+                <button onClick={fetchAdminUsers} className="admin-tab-btn">
+                  👥 All Users
+                </button>
+              </div>
+            ) : (
+              <div className="admin-setup">
+                <p>No admin user exists yet. Set up the first admin:</p>
+                <button onClick={setupFirstAdmin} className="admin-setup-btn">
+                  🛡️ Set Up First Admin
+                </button>
+              </div>
+            )}
 
-            {adminStats && (
+            {user.role === 'admin' && adminStats && (
               <div className="admin-stats">
                 <h3>📊 Platform Statistics</h3>
                 <div className="stats-grid">
@@ -1003,7 +1107,7 @@ function App() {
               </div>
             )}
 
-            {adminBubbles.length > 0 && (
+            {user.role === 'admin' && adminBubbles.length > 0 && (
               <div className="admin-bubbles">
                 <h3>🌊 All Bubbles ({adminBubbles.length})</h3>
                 {adminBubbles.map(bubble => (
@@ -1044,13 +1148,22 @@ function App() {
                           </div>
                         ))}
                       </div>
+                      <div className="admin-bubble-actions">
+                        <button 
+                          onClick={() => adminDeleteBubble(bubble.id, bubble.name)}
+                          className="admin-delete-bubble-btn"
+                          title={`Delete bubble "${bubble.name}"`}
+                        >
+                          🗑️ Delete Bubble
+                        </button>
+                      </div>
                     </div>
                   </div>
                 ))}
               </div>
             )}
 
-            {adminUsers.length > 0 && (
+            {user.role === 'admin' && adminUsers.length > 0 && (
               <div className="admin-users">
                 <h3>👥 All Users ({adminUsers.length})</h3>
                 <div className="admin-table">
@@ -1085,13 +1198,23 @@ function App() {
                           <td>{new Date(user.created_at).toLocaleDateString()}</td>
                           <td>
                             {user.role !== 'admin' && (
-                              <button 
-                                onClick={() => adminDeleteUser(user.id, user.username)}
-                                className="admin-delete-btn"
-                                title="Delete User Account"
-                              >
-                                🗑️ Delete
-                              </button>
+                              <>
+                                <button 
+                                  onClick={() => adminPromoteUser(user.id, user.username)}
+                                  className="admin-promote-btn"
+                                  title="Promote User to Admin"
+                                  style={{ marginRight: '8px' }}
+                                >
+                                  👆 Promote to Admin
+                                </button>
+                                <button 
+                                  onClick={() => adminDeleteUser(user.id, user.username)}
+                                  className="admin-delete-btn"
+                                  title="Delete User Account"
+                                >
+                                  🗑️ Delete
+                                </button>
+                              </>
                             )}
                           </td>
                         </tr>

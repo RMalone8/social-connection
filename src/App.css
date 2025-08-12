@@ -1534,7 +1534,7 @@ body::before {
 }
 
 /* Admin Action Buttons */
-.admin-delete-btn, .admin-kick-btn {
+.admin-delete-btn, .admin-kick-btn, .admin-promote-btn {
   background: #e74c3c;
   color: white;
   border: none;
@@ -1546,7 +1546,7 @@ body::before {
   transition: all 0.3s ease;
 }
 
-.admin-delete-btn:hover, .admin-kick-btn:hover {
+.admin-delete-btn:hover, .admin-kick-btn:hover, .admin-promote-btn:hover {
   background: #c0392b;
   transform: translateY(-1px);
 }
@@ -1559,6 +1559,72 @@ body::before {
 
 .admin-kick-btn:hover {
   background: #e67e22;
+}
+
+.admin-promote-btn {
+  background: #27ae60;
+  font-size: 11px;
+  padding: 4px 8px;
+}
+
+.admin-promote-btn:hover {
+  background: #229954;
+}
+
+.admin-delete-bubble-btn {
+  background: #e74c3c;
+  color: white;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  transition: all 0.3s ease;
+  margin-top: 15px;
+}
+
+.admin-delete-bubble-btn:hover {
+  background: #c0392b;
+  transform: translateY(-1px);
+}
+
+.admin-bubble-actions {
+  margin-top: 15px;
+  padding-top: 15px;
+  border-top: 1px solid #ecf0f1;
+  text-align: center;
+}
+
+.admin-setup {
+  text-align: center;
+  padding: 30px;
+  background: #f8f9fa;
+  border-radius: 15px;
+  border: 2px dashed #dee2e6;
+}
+
+.admin-setup p {
+  margin-bottom: 20px;
+  color: #6c757d;
+  font-size: 16px;
+}
+
+.admin-setup-btn {
+  background: #28a745;
+  color: white;
+  border: none;
+  padding: 12px 24px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 16px;
+  font-weight: 600;
+  transition: all 0.3s ease;
+}
+
+.admin-setup-btn:hover {
+  background: #218838;
+  transform: translateY(-1px);
 }
 
 /* Admin Bubble Sections */

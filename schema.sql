@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS native_accounts (
   email TEXT UNIQUE NOT NULL,
   password_hash TEXT NOT NULL,
   display_name TEXT,
+  role TEXT DEFAULT 'user', -- 'user', 'admin'
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 

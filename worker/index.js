@@ -31,6 +31,7 @@ async function ensureCoreSchema(env) {
         "password_hash TEXT NOT NULL, " +
         "display_name TEXT, " +
         "avatar_url TEXT, " +
+        "role TEXT DEFAULT 'user', " +
         "created_at TEXT DEFAULT CURRENT_TIMESTAMP" +
       ")"
     );
@@ -97,7 +98,51 @@ async function ensureCoreSchema(env) {
   }
 }
 
+// Ensure role column exists in native_accounts table
+async function ensureRoleColumn(env) {
+  try {
+    // Check if role column exists
+    const result = await env.DB.prepare("PRAGMA table_info(native_accounts)").all();
+    const hasRoleColumn = result.results.some(col => col.name === 'role');
+    
+    if (!hasRoleColumn) {
+      console.log('Adding role column to native_accounts table');
+      await env.DB.exec("ALTER TABLE native_accounts ADD COLUMN role TEXT DEFAULT 'user'");
+      
+      // Set the first user as admin (you can change this logic as needed)
+      const firstUser = await env.DB.prepare("SELECT id FROM native_accounts ORDER BY created_at ASC LIMIT 1").first();
+      if (firstUser) {
+        await env.DB.prepare("UPDATE native_accounts SET role = 'admin' WHERE id = ?").bind(firstUser.id).run();
+        console.log('Set first user as admin');
+      }
+    }
+  } catch (e) {
+    console.error('Role column ensure error:', e);
+  }
+}
+
+// Function to promote a user to admin (for development/testing)
+async function promoteUserToAdmin(env, username) {
+  try {
+    const result = await env.DB.prepare("UPDATE native_accounts SET role = 'admin' WHERE username = ?").bind(username).run();
+    if (result.changes > 0) {
+      console.log(`Promoted user ${username} to admin`);
+      return true;
+    } else {
+      console.log(`User ${username} not found`);
+      return false;
+    }
+  } catch (e) {
+    console.error('Promote to admin error:', e);
+    return false;
+  }
+}
+
 async function handleApiRoutes(request, env, url) {
+  // Ensure core schema and role column exists for admin functionality
+  await ensureCoreSchema(env);
+  await ensureRoleColumn(env);
+  
   // Native account authentication
   if (url.pathname === "/api/auth/register") {
     return handleRegister(request, env);
@@ -130,6 +175,19 @@ async function handleApiRoutes(request, env, url) {
 
   if (url.pathname.startsWith("/api/admin/bubbles/") && url.pathname.includes("/kick/") && request.method === "POST") {
     return handleAdminKickUserFromBubble(request, env);
+  }
+
+  if (url.pathname.startsWith("/api/admin/bubbles/") && url.pathname.endsWith("/delete") && request.method === "DELETE") {
+    return handleAdminDeleteBubble(request, env);
+  }
+
+  if (url.pathname.startsWith("/api/admin/users/") && url.pathname.endsWith("/promote") && request.method === "POST") {
+    return handleAdminPromoteUser(request, env);
+  }
+
+  // Special route to set up first admin (only works if no admin exists)
+  if (url.pathname === "/api/admin/setup" && request.method === "POST") {
+    return handleAdminSetup(request, env);
   }
 
   // Social media linking (requires native login first)
@@ -535,14 +593,12 @@ async function handleRegister(request, env) {
     headers.set('Content-Type', 'application/json');
     headers.append('Set-Cookie', `session=${sessionToken}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=${7 * 24 * 60 * 60}`);
 
+    // Get complete user data including role and social accounts
+    const completeUser = await getSessionUser(env, sessionToken);
+
     return new Response(JSON.stringify({
       success: true,
-      user: {
-        id: newAccount.id,
-        username: newAccount.username,
-        email: newAccount.email,
-        display_name: newAccount.display_name
-      }
+      user: completeUser
     }), { status: 201, headers });
 
   } catch (error) {
@@ -607,13 +663,12 @@ async function handleLogin(request, env) {
     headers.set('Content-Type', 'application/json');
     headers.append('Set-Cookie', `session=${sessionToken}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=${7 * 24 * 60 * 60}`);
 
+    // Get complete user data including role and social accounts
+    const completeUser = await getSessionUser(env, sessionToken);
+
     return new Response(JSON.stringify({
       success: true,
-      user: {
-        username: account.username,
-        email: account.email,
-        displayName: account.display_name
-      }
+      user: completeUser
     }), { status: 200, headers });
 
   } catch (error) {
@@ -2946,6 +3001,142 @@ async function handleAdminKickUserFromBubble(request, env) {
   } catch (error) {
     console.error('Error kicking user from bubble:', error);
     return new Response(JSON.stringify({ error: 'Failed to kick user from bubble' }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+}
+
+// Admin: Delete any bubble
+async function handleAdminDeleteBubble(request, env) {
+  try {
+    const { error, user } = await requireAdmin(request, env);
+    if (error) return error;
+
+    const url = new URL(request.url);
+    const pathParts = url.pathname.split('/'); // /api/admin/bubbles/{bubbleId}/delete
+    const bubbleId = pathParts[4]; // Index 4 should be bubbleId
+
+    console.log(`Admin ${user.username} deleting bubble - URL: ${url.pathname}, Parts: ${JSON.stringify(pathParts)}, BubbleID: ${bubbleId}`);
+
+    // Validate ID
+    if (!bubbleId || isNaN(parseInt(bubbleId))) {
+      return Response.json({ error: 'Invalid bubble ID' }, { status: 400 });
+    }
+
+    const bubbleIdInt = parseInt(bubbleId);
+
+    // Get bubble info for logging
+    const bubble = await env.DB.prepare(`
+      SELECT name, creator_id FROM bubbles WHERE id = ?
+    `).bind(bubbleIdInt).first();
+
+    if (!bubble) {
+      return Response.json({ error: 'Bubble not found' }, { status: 404 });
+    }
+
+    // Delete all memberships for this bubble
+    await env.DB.prepare(`
+      DELETE FROM bubble_memberships WHERE bubble_id = ?
+    `).bind(bubbleIdInt).run();
+
+    // Delete the bubble
+    await env.DB.prepare(`
+      DELETE FROM bubbles WHERE id = ?
+    `).bind(bubbleIdInt).run();
+
+    console.log(`Admin ${user.username} successfully deleted bubble: "${bubble.name}" (ID: ${bubbleIdInt})`);
+
+    return Response.json({ 
+      success: true, 
+      message: `Bubble "${bubble.name}" deleted successfully` 
+    });
+  } catch (error) {
+    console.error('Error deleting bubble:', error);
+    return new Response(JSON.stringify({ error: 'Failed to delete bubble' }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+}
+
+// Admin: Promote a user to admin
+async function handleAdminPromoteUser(request, env) {
+  try {
+    const { error, user } = await requireAdmin(request, env);
+    if (error) return error;
+
+    const url = new URL(request.url);
+    const pathParts = url.pathname.split('/'); // /api/admin/users/{userId}/promote
+    const userId = pathParts[4]; // Index 4 should be userId
+
+    console.log(`Admin ${user.username} promoting user - URL: ${url.pathname}, Parts: ${JSON.stringify(pathParts)}, UserID: ${userId}`);
+
+    // Validate ID
+    if (!userId || isNaN(parseInt(userId))) {
+      return Response.json({ error: 'Invalid user ID' }, { status: 400 });
+    }
+
+    const userIdInt = parseInt(userId);
+
+    // Get user info for logging
+    const targetUser = await env.DB.prepare(`
+      SELECT username, display_name FROM native_accounts WHERE id = ?
+    `).bind(userIdInt).first();
+
+    if (!targetUser) {
+      return Response.json({ error: 'User not found' }, { status: 404 });
+    }
+
+    // Promote user to admin
+    await env.DB.prepare(`
+      UPDATE native_accounts SET role = 'admin' WHERE id = ?
+    `).bind(userIdInt).run();
+
+    console.log(`Admin ${user.username} successfully promoted ${targetUser.username} to admin`);
+
+    return Response.json({ 
+      success: true, 
+      message: `${targetUser.display_name || targetUser.username} promoted to admin successfully` 
+    });
+  } catch (error) {
+    console.error('Error promoting user to admin:', error);
+    return new Response(JSON.stringify({ error: 'Failed to promote user to admin' }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+}
+
+// Admin Setup: Set up first admin user
+async function handleAdminSetup(request, env) {
+  try {
+    // Check if any admin already exists
+    const existingAdmin = await env.DB.prepare("SELECT id FROM native_accounts WHERE role = 'admin' LIMIT 1").first();
+    
+    if (existingAdmin) {
+      return Response.json({ error: 'Admin already exists' }, { status: 400 });
+    }
+
+    // Get the first user and make them admin
+    const firstUser = await env.DB.prepare("SELECT id, username, display_name FROM native_accounts ORDER BY created_at ASC LIMIT 1").first();
+    
+    if (!firstUser) {
+      return Response.json({ error: 'No users found' }, { status: 400 });
+    }
+
+    // Promote first user to admin
+    await env.DB.prepare("UPDATE native_accounts SET role = 'admin' WHERE id = ?").bind(firstUser.id).run();
+
+    console.log(`Set up first admin: ${firstUser.username} (${firstUser.display_name})`);
+
+    return Response.json({ 
+      success: true, 
+      message: `${firstUser.display_name || firstUser.username} has been set as the first admin` 
+    });
+  } catch (error) {
+    console.error('Admin setup error:', error);
+    return new Response(JSON.stringify({ error: 'Failed to set up admin' }), {
       status: 500,
       headers: { 'Content-Type': 'application/json' }
     });
