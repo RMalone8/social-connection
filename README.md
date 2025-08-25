@@ -6,3 +6,5 @@ Bubbly lets you create and join social “bubbles” to connect accounts and tak
 * Bubble creators can manage members and roles
 
 Visit [Bubbly](https://social.moose.boston) to join the social bubble!
+
+<sub>Not supporting password reset for the time being</sub>
